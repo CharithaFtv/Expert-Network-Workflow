@@ -1,0 +1,6 @@
+
+d0000000000000000000000000000001,Zeta Active,Active,2 - Diligence,c0000000000000000000000000000001,"Zeta, Inc.",FTS,Payments,"[{""ID"":""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"",""NAME"":""Alice Associate""},{""ID"":""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2"",""NAME"":""Bob Partner""},{""ID"":""ffffffffffffffffffffffffffffffff"",""NAME"":""Unknown""}]"
+d0000000000000000000000000000002,Alpha Lead,Lead,1 - Sourcing,c0000000000000000000000000000002,Alpha Co,FTS,Banking,"[]"
+d0000000000000000000000000000003,Beta Active,Active,2 - Diligence,c0000000000000000000000000000003,Beta Co,HC,Employer,"[{""ID"":""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2"",""NAME"":""Bob Partner""}]"
+d0000000000000000000000000000004,Gamma Passed,Passed,5 - Closed,c0000000000000000000000000000004,Gamma Co,HC,Employer,"[]"
+d0000000000000000000000000000005,Delta Broken Team,Active,2 - Diligence,c0000000000000000000000000000005,Delta Co,FTS,Insurance,"not json"
