@@ -8,7 +8,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "migrate": "node --env-file-if-exists=.env.local scripts/migrate.mjs"
+    "migrate": "node --env-file-if-exists=.env.local scripts/migrate.mjs",
+    "send-outbox": "node --env-file-if-exists=.env.local scripts/send-outbox.ts"
   },
   "dependencies": {
     "next": "16.4.6",
