@@ -1,3 +1,5 @@
+import { after } from "next/server";
+import { sendProjectMail } from "@/lib/mail/trigger";
 import { createProject } from "@/lib/projects";
 import { currentUser } from "@/lib/session";
 
@@ -12,5 +14,7 @@ export async function POST(req: Request) {
   }
   const result = await createProject(body, user);
   if (!result.ok) return Response.json({ errors: result.errors }, { status: 422 });
+  // Deliver this project's mail after the response; the request is already saved.
+  after(() => sendProjectMail(result.id));
   return Response.json({ id: result.id }, { status: 201 });
 }

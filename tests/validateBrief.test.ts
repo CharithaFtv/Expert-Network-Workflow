@@ -67,11 +67,9 @@ describe("validateBrief", () => {
     const r = await check({
       title: "x".repeat(500),
       targetCompanies: [" A ", "A", "", 5],
-      decisionMakerRequired: "true",
     });
     expect(r.input.title).toHaveLength(140);
     expect(r.input.targetCompanies).toEqual(["A"]); // non-strings dropped
-    expect(r.input.decisionMakerRequired).toBe(false);
   });
 
   it("survives garbage payloads", async () => {

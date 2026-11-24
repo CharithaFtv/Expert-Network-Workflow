@@ -76,8 +76,6 @@ function DealPicker({ deal, onChange }: { deal: Deal | null; onChange: (d: Deal 
           </div>
         </div>
         <dl className="kv" style={{ marginTop: 12 }}>
-          <dt>Stage</dt>
-          <dd>{deal.stage || "Not set"}</dd>
           <dt>Sector</dt>
           <dd>{[deal.sector, deal.subsector].filter(Boolean).join(" / ") || "Not set"}</dd>
           <dt>Deal team</dt>
@@ -125,7 +123,7 @@ function DealPicker({ deal, onChange }: { deal: Deal | null; onChange: (d: Deal 
               <div>
                 <div className="primary">{d.name}</div>
                 <div className="secondary">
-                  {[d.companyName, d.stage].filter(Boolean).join(" · ")}
+                  {d.companyName}
                 </div>
               </div>
               <span className={`tag ${d.status.toLowerCase()}`}>{d.status}</span>
@@ -305,8 +303,6 @@ export default function InitiationForm(props: {
   const [competitors, setCompetitors] = useState<string[]>([]);
   const [targetLogos, setTargetLogos] = useState<string[]>([]);
   const [expertTypes, setExpertTypes] = useState<string[]>([]);
-  const [decisionMakerRequired, setDecisionMakerRequired] = useState(false);
-  const [geography, setGeography] = useState("");
   const [screener, setScreener] = useState<string[]>([""]);
   const [callsTarget, setCallsTarget] = useState("5");
   const [startDate, setStartDate] = useState(today);
@@ -343,8 +339,6 @@ export default function InitiationForm(props: {
       competitors,
       targetLogos,
       expertTypes,
-      decisionMakerRequired,
-      geography,
       screener,
       callsTarget: Number(callsTarget),
       startDate,
@@ -497,18 +491,6 @@ export default function InitiationForm(props: {
             ))}
           </div>
         </Field>
-        <Field label="Seniority">
-          <div className="checks">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={decisionMakerRequired}
-                onChange={(e) => setDecisionMakerRequired(e.target.checked)}
-              />
-              Key decision makers only
-            </label>
-          </div>
-        </Field>
         <Field
           label="Organisations to source experts from"
           htmlFor="logos"
@@ -519,15 +501,6 @@ export default function InitiationForm(props: {
             values={targetLogos}
             onChange={setTargetLogos}
             placeholder="Erie Materials, Parksite, First Supply"
-          />
-        </Field>
-        <Field label="Geography" htmlFor="geography" hint="Optional.">
-          <input
-            id="geography"
-            type="text"
-            placeholder="North America"
-            value={geography}
-            onChange={(e) => setGeography(e.target.value)}
           />
         </Field>
       </section>
@@ -604,6 +577,9 @@ export default function InitiationForm(props: {
           </Field>
         </div>
         <Field label="Expert network" required error={errors.vendorIds}>
+          {vendors.length === 0 && (
+            <p className="hint">No expert networks are set up to receive requests yet.</p>
+          )}
           <div className="checks">
             {vendors.map((v) => (
               <label key={v.id} className="check">

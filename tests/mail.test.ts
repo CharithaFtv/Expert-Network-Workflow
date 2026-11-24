@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { GraphMailTransport } from "@/lib/mail/graph";
-import { mailMode } from "@/lib/mail";
+import { mailMode, sendPolicy } from "@/lib/mail";
+import { sendProjectMail } from "@/lib/mail/trigger";
+import { createProject } from "@/lib/projects";
 import { drainOutbox, requeueFailed } from "@/lib/mail/sender";
 import { MailError, type MailTransport } from "@/lib/mail/transport";
-import { resetDb } from "./helpers";
+import { ALICE, person, resetDb, validBrief } from "./helpers";
 
 const cfg = { tenantId: "t", clientId: "c", clientSecret: "s", mailbox: "box@x.com" };
 
@@ -91,12 +93,12 @@ describe("drainOutbox", () => {
     await queue("a@x.com");
     const sent: string[] = [];
     const t: MailTransport = { send: async (m) => void sent.push(m.to) };
-    expect(await drainOutbox(t)).toEqual({ sent: 1, failed: 0, retried: 0, stuck: 0 });
+    expect(await drainOutbox(t)).toEqual({ sent: 1, failed: 0, retried: 0, blocked: 0, stuck: 0 });
     expect(sent).toEqual(["a@x.com"]);
     const [row] = await db.query<{ status: string; sent_at: string }>("SELECT status, sent_at FROM outbox");
     expect(row.status).toBe("Sent");
     expect(row.sent_at).toBeTruthy();
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 0, stuck: 0 }); // nothing sent twice
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 0, blocked: 0, stuck: 0 }); // nothing sent twice
   });
 
   it("stores the thread ids returned by the transport", async () => {
@@ -119,9 +121,9 @@ describe("drainOutbox", () => {
   it("retries then marks Failed after 3 attempts", async () => {
     await queue("a@x.com");
     const t: MailTransport = { send: async () => Promise.reject(new Error("boom")) };
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 1, stuck: 0 });
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 1, blocked: 0, stuck: 0 });
     await drainOutbox(t);
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 1, retried: 0, stuck: 0 });
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 1, retried: 0, blocked: 0, stuck: 0 });
     const [row] = await db.query<{ status: string; attempts: number; last_error: string }>(
       "SELECT status, attempts, last_error FROM outbox",
     );
@@ -177,5 +179,64 @@ describe("drainOutbox", () => {
     expect(await requeueFailed()).toBe(1);
     const [row] = await db.query<{ status: string; attempts: number }>("SELECT status, attempts FROM outbox");
     expect(row).toEqual({ status: "Queued", attempts: 0 });
+  });
+
+  it("blocks any recipient that is not on the allowlist and never sends it", async () => {
+    await queue("vendor@external.com");
+    await queue("Adas@ftvcapital.com");
+    const sent: string[] = [];
+    const r = await drainOutbox(
+      { send: async (m) => void sent.push(m.to) },
+      { allowedRecipients: ["adas@ftvcapital.com", "charitha@ftvcapital.com"] },
+    );
+    expect(r).toMatchObject({ sent: 1, blocked: 1 });
+    expect(sent).toEqual(["Adas@ftvcapital.com"]);
+    const rows = await db.query<{ recipient: string; status: string; attempts: number }>(
+      "SELECT recipient, status, attempts FROM outbox ORDER BY id",
+    );
+    expect(rows).toEqual([
+      { recipient: "vendor@external.com", status: "Blocked", attempts: 0 },
+      { recipient: "Adas@ftvcapital.com", status: "Sent", attempts: 1 },
+    ]);
+    expect(await requeueFailed()).toBe(1); // Blocked rows can be released after the allowlist changes
+  });
+
+  it("limits a run to one project and keeps the vendor status in step", async () => {
+    const a = await createProject(validBrief({ vendorIds: [1], teamUserIds: [] }), person(ALICE));
+    const b = await createProject(validBrief({ vendorIds: [1], teamUserIds: [] }), person(ALICE));
+    if (!a.ok || !b.ok) throw new Error("setup failed");
+    const sent: string[] = [];
+    const r = await drainOutbox({ send: async (m) => void sent.push(m.subject) }, { projectId: a.id });
+    expect(r.sent).toBe(1);
+    const status = async (id: number) =>
+      (await db.query<{ status: string }>("SELECT status FROM project_vendors WHERE project_id=$1", [id]))[0].status;
+    expect(await status(a.id)).toBe("Sent");
+    expect(await status(b.id)).toBe("Pending send");
+    await drainOutbox({ send: async () => Promise.reject(new MailError("bad", "permanent")) }, { projectId: b.id });
+    expect(await status(b.id)).toBe("Send failed");
+  });
+});
+
+describe("sendPolicy and the submit trigger", () => {
+  it("refuses real sending outside production without an allowlist or redirect", () => {
+    expect(() => sendPolicy({ MAIL_MODE: "graph" })).toThrow(/Refusing/);
+    expect(sendPolicy({ MAIL_MODE: "graph", MAIL_ALLOWED_RECIPIENTS: " A@x.com, b@x.com " }).allowedRecipients).toEqual([
+      "a@x.com",
+      "b@x.com",
+    ]);
+    expect(sendPolicy({ MAIL_MODE: "graph", MAIL_DEV_RECIPIENT: "Me@x.com" }).redirectTo).toBe("me@x.com");
+    expect(() => sendPolicy({ MAIL_MODE: "graph", NODE_ENV: "production" })).not.toThrow();
+    expect(() => sendPolicy({})).not.toThrow();
+  });
+
+  beforeEach(resetDb);
+
+  it("does nothing in log mode, and never throws when sending is refused", async () => {
+    const p = await createProject(validBrief({ vendorIds: [1], teamUserIds: [] }), person(ALICE));
+    if (!p.ok) throw new Error("setup failed");
+    expect(await sendProjectMail(p.id, {})).toMatchObject({ skipped: expect.any(String) });
+    expect(await sendProjectMail(p.id, { MAIL_MODE: "graph" })).toMatchObject({ error: expect.stringMatching(/Refusing/) });
+    const [row] = await db.query<{ status: string }>("SELECT status FROM outbox WHERE project_id=$1", [p.id]);
+    expect(row.status).toBe("Queued");
   });
 });

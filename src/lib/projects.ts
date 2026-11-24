@@ -35,7 +35,10 @@ export function localToday(): string {
 }
 
 export async function listVendors(): Promise<Vendor[]> {
-  return db.query<Vendor>("SELECT id, name FROM vendors WHERE active = 1 ORDER BY id");
+  // Only networks with an intake address can receive a brief, so only those are offered.
+  return db.query<Vendor>(
+    "SELECT id, name FROM vendors WHERE active = 1 AND COALESCE(intake_email, '') <> '' ORDER BY id",
+  );
 }
 
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
@@ -60,8 +63,6 @@ export async function validateBrief(raw: unknown, requester: Person) {
     expertTypes: list(r.expertTypes, 10).filter((t) =>
       (EXPERT_TYPES as readonly string[]).includes(t),
     ),
-    decisionMakerRequired: r.decisionMakerRequired === true,
-    geography: str(r.geography, 200),
     screener: list(r.screener, 12, 600),
     callsTarget: Number(r.callsTarget),
     startDate: str(r.startDate, 10),
@@ -97,7 +98,7 @@ export async function validateBrief(raw: unknown, requester: Person) {
 
   const known = new Set((await listVendors()).map((v) => v.id));
   input.vendorIds = input.vendorIds.filter((id) => known.has(id));
-  if (!input.vendorIds.length) errors.vendorIds = "Choose at least one expert network.";
+  if (!input.vendorIds.length) errors.vendorIds = "Choose at least one expert network that is set up to receive requests.";
 
   const unknownUser = input.teamUserIds.find((id) => !getUser(id));
   if (unknownUser) errors.teamUserIds = "One of the tagged people is not an active FTV user.";
@@ -115,14 +116,9 @@ export function buildNetworkBrief(input: BriefInput, requester: Person): string 
     `Target company: ${input.targetCompanies.join(", ")}`,
   ];
   if (input.competitors.length) lines.push(`Known competitors: ${input.competitors.join(", ")}`);
-  lines.push(
-    `Expert profiles: ${input.expertTypes.join(", ")}${
-      input.decisionMakerRequired ? " (key decision makers only)" : ""
-    }`,
-  );
+  lines.push(`Expert profiles: ${input.expertTypes.join(", ")}`);
   if (input.targetLogos.length)
     lines.push(`Organisations to source from: ${input.targetLogos.join(", ")}`);
-  if (input.geography) lines.push(`Geography: ${input.geography}`);
   lines.push(
     `Calls requested: ${input.callsTarget}`,
     `Window: ${input.startDate} to ${input.endDate}`,
@@ -176,10 +172,10 @@ export async function createProject(
         "INSERT INTO project_members (project_id, user_id, user_name, user_email, role) VALUES ($1, $2, $3, $4, $5)",
         [pid, u.id, u.name, u.email, role],
       );
-    const queue = (kind: string, recipient: string, subject: string, body: string) =>
+    const queue = (kind: string, recipient: string, subject: string, body: string, vendorId?: number) =>
       q.query(
-        "INSERT INTO outbox (project_id, kind, recipient, subject, body, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-        [pid, kind, recipient, subject, body, now],
+        "INSERT INTO outbox (project_id, kind, recipient, subject, body, created_at, vendor_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [pid, kind, recipient, subject, body, now, vendorId ?? null],
       );
 
     await addMember(requester, "Requester");
@@ -204,7 +200,7 @@ export async function createProject(
         [vid],
       );
       if (!v.intake_email) throw new Error(`Vendor ${v.name} has no intake email configured`);
-      await queue("network-brief", v.intake_email, `[${code}] ${input.title}`, networkBrief);
+      await queue("network-brief", v.intake_email, `[${code}] ${input.title}`, networkBrief, vid);
     }
     return pid;
   });

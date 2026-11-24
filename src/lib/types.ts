@@ -41,8 +41,6 @@ export type BriefInput = {
   competitors: string[];
   targetLogos: string[];
   expertTypes: string[];
-  decisionMakerRequired: boolean;
-  geography: string;
   screener: string[];
   callsTarget: number;
   startDate: string;

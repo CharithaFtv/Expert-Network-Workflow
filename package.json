@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "node --env-file-if-exists=.env.local scripts/migrate.mjs",
+    "vendors": "node --env-file-if-exists=.env.local scripts/vendors.ts",
     "send-outbox": "node --env-file-if-exists=.env.local scripts/send-outbox.ts"
   },
   "dependencies": {

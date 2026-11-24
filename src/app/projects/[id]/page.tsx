@@ -36,10 +36,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
               <dt>Expert profiles</dt>
               <dd>
                 {brief.expertTypes.join(", ")}
-                {brief.decisionMakerRequired && " (key decision makers only)"}
               </dd>
-              <dt>Geography</dt>
-              <dd>{brief.geography || "No restriction"}</dd>
               <dt>Calls requested</dt>
               <dd>{brief.callsTarget}</dd>
               <dt>Window</dt>
@@ -115,8 +112,6 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             <dl className="kv" style={{ gridTemplateColumns: "80px 1fr" }}>
               <dt>Company</dt>
               <dd>{project.company_name}</dd>
-              <dt>Stage</dt>
-              <dd>{project.deal_stage || "Not set"}</dd>
               <dt>Sector</dt>
               <dd>{project.sector || "Not set"}</dd>
             </dl>

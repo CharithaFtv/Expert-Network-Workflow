@@ -5,6 +5,7 @@ import {
   createProject,
   getProjectFor,
   listNotifications,
+  listVendors,
   listProjectsFor,
   markAllRead,
   unreadCount,
@@ -64,9 +65,12 @@ describe("createProject", () => {
     }
   });
 
-  it("refuses a vendor with no intake email and saves nothing", async () => {
+  it("offers and accepts only vendors that have an intake email", async () => {
     await db.query("UPDATE vendors SET intake_email = NULL WHERE id = 1");
-    await expect(create()).rejects.toThrow(/no intake email/);
+    expect((await listVendors()).map((v) => v.id)).not.toContain(1);
+    const r = await create();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.vendorIds).toMatch(/set up to receive/);
     expect(await count("projects")).toBe(0);
     expect(await count("outbox")).toBe(0);
   });
@@ -134,7 +138,6 @@ describe("buildNetworkBrief", () => {
     const text = buildNetworkBrief(input, person(ALICE));
     expect(text).toContain("Target company: Kodaris");
     expect(text).toContain("Known competitors: Suppli");
-    expect(text).toContain("key decision makers only");
     expect(text).toContain("Calls requested: 5");
     expect(text).toContain("1. What was your role in the decision?");
     expect(text).toContain("Alice Associate");
@@ -143,13 +146,11 @@ describe("buildNetworkBrief", () => {
 
   it("omits optional sections when empty", async () => {
     const { input } = await validateBrief(
-      validBrief({ competitors: [], screener: [], geography: "", decisionMakerRequired: false }),
+      validBrief({ competitors: [], screener: [] }),
       person(ALICE),
     );
     const text = buildNetworkBrief(input, person(ALICE));
     expect(text).not.toContain("Known competitors");
     expect(text).not.toContain("use the screener");
-    expect(text).not.toContain("Geography");
-    expect(text).not.toContain("decision makers only");
   });
 });

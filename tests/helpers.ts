@@ -23,8 +23,6 @@ export function validBrief(over: Record<string, unknown> = {}) {
     competitors: ["Suppli"],
     targetLogos: [],
     expertTypes: ["Current customers"],
-    decisionMakerRequired: true,
-    geography: "US",
     screener: ["What was your role in the decision?"],
     callsTarget: 5,
     startDate: "",
