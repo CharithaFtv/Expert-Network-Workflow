@@ -23,7 +23,8 @@ export class CursorExpiredError extends Error {}
 /** Where the poller reads from. Graph in production, a fake in tests. */
 export interface InboxReader {
   /**
-   * Walks every change after `cursor` (or after `since` when there is none), page by page. `onPage`
+   * Walks every change after `cursor` (or the whole Inbox when there is none), page by page, and drops
+   * messages received before `since`. `onPage`
    * gets each page with `checkpoint`, a link the walk can safely resume from once the page is handled
    * (null on the last page). Returns the final delta link.
    */
@@ -95,8 +96,7 @@ export class GraphInbox extends GraphClient implements InboxReader {
   ): Promise<string> {
     let url =
       cursor ??
-      `/mailFolders/inbox/messages/delta?$select=${SELECT}` +
-        `&$filter=${encodeURIComponent(`receivedDateTime ge ${since.toISOString()}`)}`;
+      `/mailFolders/inbox/messages/delta?$select=${SELECT}`;
     const headers = { Prefer: 'IdType="ImmutableId", odata.maxpagesize=50' };
 
     for (let page = 0; page < MAX_PAGES; page++) {
@@ -111,7 +111,12 @@ export class GraphInbox extends GraphClient implements InboxReader {
         "@odata.deltaLink"?: string;
       };
       // Deletions arrive as "@removed" stubs; drafts are never mail we received.
-      const live = json.value.filter((m) => !m["@removed"] && !m.isDraft).map(toInboundMessage);
+      // The lookback is applied here, not with $filter: Graph caps a filtered delta query at 5,000
+      // messages and would silently leave the rest out while still handing back a final token.
+      const live = json.value
+        .filter((m) => !m["@removed"] && !m.isDraft)
+        .map(toInboundMessage)
+        .filter((m) => new Date(m.receivedAt).getTime() >= since.getTime());
       const nextLink = json["@odata.nextLink"] ?? null;
       if (live.length || nextLink) await onPage(live, nextLink);
       if (json["@odata.deltaLink"]) return json["@odata.deltaLink"];

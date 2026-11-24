@@ -24,7 +24,7 @@ try {
   });
   console.log(`poll-inbox${dryRun ? " (dry run, nothing stored)" : ""}:`, result);
   if (result.failed.length) {
-    console.error(`${result.failed.length} message(s) could not be stored and were skipped: ${result.failed.join(", ")}`);
+    console.error(`${result.failed.length} message(s) could not be stored. They are kept in the inbound_failures table: ${result.failed.join(", ")}`);
     exitCode = 1;
   }
 } catch (e) {

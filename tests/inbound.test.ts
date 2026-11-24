@@ -114,8 +114,30 @@ describe("pollInbox", () => {
     } finally {
       spy.mockRestore();
     }
+    const [q] = await db.query<{ graph_id: string; error: string; payload: { subject: string } }>(
+      "SELECT graph_id, error, payload FROM inbound_failures",
+    );
+    expect(q).toMatchObject({ graph_id: "g2", error: "invalid byte sequence" });
+    expect(q.payload.subject).toContain("ask 2");
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-ok");
+  });
+
+  it("stops without moving the cursor when a refused message cannot be quarantined either", async () => {
+    await pollInbox(fakeReader([[msg(1)]], "delta-1"));
+    const real = db.query.bind(db);
+    const spy = vi.spyOn(db, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("INSERT INTO inbound_messages")) throw Object.assign(new Error("bad"), { code: "22021" });
+      if (text.includes("INSERT INTO inbound_failures")) throw new Error("db down");
+      return real(text, params);
+    });
+    try {
+      await expect(pollInbox(fakeReader([[msg(2)]], "delta-2"))).rejects.toThrow("db down");
+    } finally {
+      spy.mockRestore();
+    }
+    const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
+    expect(s.delta_link).toBe("delta-1");
   });
 
   it("does not hide a database outage as a bad message", async () => {
@@ -213,8 +235,20 @@ describe("GraphInbox", () => {
     expect(got.map((m) => m.graphId)).toEqual(["a", "d"]);
     expect(got[0]).toMatchObject({ fromAddress: "charitha@ftvcapital.com", bodyType: "html", hasAttachments: true });
     expect(urls[0]).toContain("/mailFolders/inbox/messages/delta");
-    expect(urls[0]).toContain("receivedDateTime");
+    expect(urls[0]).not.toContain("$filter"); // a filtered delta query is capped at 5,000 messages
     expect(prefer.every((p) => p?.includes('IdType="ImmutableId"'))).toBe(true);
+  });
+
+  it("drops messages received before the lookback instead of filtering in the query", async () => {
+    const { inbox } = graph([
+      json({
+        value: [raw("old", { receivedDateTime: "2026-11-01T00:00:00Z" }), raw("new")],
+        "@odata.deltaLink": "https://graph.microsoft.com/v1.0/d",
+      }),
+    ]);
+    const got: InboundMessage[] = [];
+    await inbox.readChanges(null, new Date("2026-11-20T00:00:00Z"), async (p) => void got.push(...p));
+    expect(got.map((m) => m.graphId)).toEqual(["new"]);
   });
 
   it("maps a 410 to CursorExpiredError", async () => {

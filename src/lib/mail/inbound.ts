@@ -8,13 +8,36 @@ export type PollResult = {
   fetched: number;
   stored: number;
   duplicates: number;
-  /** Graph IDs Postgres refused to store (the poll went on without them). */
+  /** Graph IDs Postgres refused to store; each is kept in inbound_failures. */
   failed: string[];
   cursorReset?: boolean;
 };
 
 /** Postgres text and JSONB cannot hold a NUL character; email can, so remove it before inserting. */
 const noNul = (s: string) => s.replaceAll("\u0000", "");
+/** JSONB rejects a lone surrogate escape, so swap any for U+FFFD before the payload is stored. */
+const wellFormed = (s: string) =>
+  s.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
+
+/**
+ * Keeps a message that could not be stored, with the error, so it is not lost when the cursor moves on.
+ * If even this fails the error propagates: the poll stops and the cursor stays where it was.
+ */
+async function quarantine(m: InboundMessage, error: unknown) {
+  const clean = stripNuls(m);
+  await db.query(
+    `INSERT INTO inbound_failures (graph_id, internet_message_id, error, payload, created_at)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (graph_id) DO UPDATE SET error = $3`,
+    [
+      clean.graphId,
+      clean.internetMessageId && wellFormed(clean.internetMessageId),
+      wellFormed(String((error as Error).message ?? error)).slice(0, 500),
+      JSON.stringify(clean, (_k, v) => (typeof v === "string" ? wellFormed(v) : v)),
+      new Date().toISOString(),
+    ],
+  );
+}
 function stripNuls(m: InboundMessage): InboundMessage {
   return {
     ...m,
@@ -73,7 +96,8 @@ async function saveCursor(link: string, since: Date) {
  * One poll. After each page is stored the cursor moves to that page's paging link, so a crash or the
  * page cap loses at most one page of progress and the unique IDs drop the repeats. The final delta link
  * is saved last. An expired cursor restarts from the lookback window (`opts.since`, else the last 14 days).
- * A message Postgres refuses to store is reported in `failed` and skipped so it cannot block the mailbox.
+ * A message Postgres refuses to store is saved in `inbound_failures` and reported in `failed`, so it
+ * cannot block the mailbox and is not lost.
  * dryRun reads and counts but stores nothing and keeps the cursor where it was.
  */
 export async function pollInbox(
@@ -100,6 +124,7 @@ export async function pollInbox(
         else result.duplicates++;
       } catch (e) {
         if (!isDataError(e)) throw e;
+        await quarantine(m, e); // saved before the cursor can move past it
         result.failed.push(m.graphId);
       }
     }
