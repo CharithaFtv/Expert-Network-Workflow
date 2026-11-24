@@ -23,6 +23,10 @@ try {
       : undefined,
   });
   console.log(`poll-inbox${dryRun ? " (dry run, nothing stored)" : ""}:`, result);
+  if (result.failed.length) {
+    console.error(`${result.failed.length} message(s) could not be stored and were skipped: ${result.failed.join(", ")}`);
+    exitCode = 1;
+  }
 } catch (e) {
   console.error(`poll-inbox: ${(e as Error).message}`);
   exitCode = 1;

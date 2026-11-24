@@ -35,7 +35,7 @@ describe("GraphMailTransport", () => {
     expect(urls(f).filter((u) => u.includes("oauth2")).length).toBe(1); // token cached
     const [url, init] = calls[1];
     expect(url).toBe("https://graph.microsoft.com/v1.0/users/box%40x.com/sendMail");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer tok");
     expect(JSON.parse(init.body as string).message.toRecipients[0].emailAddress.address).toBe("a@b.com");
   });
 

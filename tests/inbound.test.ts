@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { pollInbox } from "@/lib/mail/inbound";
 import { CursorExpiredError, GraphInbox, type InboundMessage, type InboxReader } from "@/lib/mail/inbox";
@@ -27,7 +27,7 @@ function fakeReader(pages: InboundMessage[][], link = "delta-1"): InboxReader & 
     calls,
     async readChanges(cursor, _since, onPage) {
       calls.push(cursor);
-      for (const p of pages) await onPage(p);
+      for (const p of pages) await onPage(p, null);
       return link;
     },
   };
@@ -38,7 +38,7 @@ beforeEach(resetDb);
 describe("pollInbox", () => {
   it("stores messages and saves the cursor", async () => {
     const r = await pollInbox(fakeReader([[msg(1), msg(2)], [msg(3)]]));
-    expect(r).toEqual({ fetched: 3, stored: 3, duplicates: 0 });
+    expect(r).toEqual({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-1");
   });
@@ -64,7 +64,7 @@ describe("pollInbox", () => {
     await pollInbox(fakeReader([[msg(1)]], "delta-1"));
     const failing: InboxReader = {
       async readChanges(_c, _s, onPage) {
-        await onPage([msg(2)]);
+        await onPage([msg(2)], null);
         throw new Error("boom");
       },
     };
@@ -82,13 +82,84 @@ describe("pollInbox", () => {
       async readChanges(cursor, _s, onPage) {
         calls.push(cursor);
         if (cursor) throw new CursorExpiredError("gone");
-        await onPage([msg(1), msg(2)]);
+        await onPage([msg(1), msg(2)], null);
         return "delta-2";
       },
     };
     const r = await pollInbox(expiring);
     expect(calls).toEqual(["delta-1", null]);
     expect(r).toMatchObject({ cursorReset: true, stored: 1, duplicates: 1 });
+  });
+
+  it("stores a message that contains NUL characters", async () => {
+    const r = await pollInbox(
+      fakeReader([[msg(1, { body: "a\u0000b", subject: "x\u0000y", headers: [{ name: "H", value: "v\u0000" }] })]]),
+    );
+    expect(r).toMatchObject({ stored: 1, failed: [] });
+    const [row] = await db.query<{ body: string; subject: string }>("SELECT body, subject FROM inbound_messages");
+    expect(row).toEqual({ body: "ab", subject: "xy" });
+  });
+
+  it("skips a message Postgres refuses with a data error and still advances the cursor", async () => {
+    const real = db.query.bind(db);
+    const spy = vi.spyOn(db, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("INSERT INTO inbound_messages") && params?.[0] === "g2") {
+        throw Object.assign(new Error("invalid byte sequence"), { code: "22021" });
+      }
+      return real(text, params);
+    });
+    try {
+      const r = await pollInbox(fakeReader([[msg(1), msg(2), msg(3)]], "delta-ok"));
+      expect(r).toMatchObject({ fetched: 3, stored: 2, failed: ["g2"] });
+    } finally {
+      spy.mockRestore();
+    }
+    const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
+    expect(s.delta_link).toBe("delta-ok");
+  });
+
+  it("does not hide a database outage as a bad message", async () => {
+    const failing: InboxReader = {
+      async readChanges(_c, _s, onPage) {
+        await db.query("SELECT 1");
+        await onPage([{ ...msg(1), receivedAt: undefined as unknown as string }], null); // NOT NULL violation (class 23)
+        return "x";
+      },
+    };
+    await expect(pollInbox(failing)).rejects.toThrow();
+  });
+
+  it("saves a checkpoint after every page so a capped run resumes instead of restarting", async () => {
+    const pages: [InboundMessage[], string | null][] = [[[msg(1)], "next-1"], [[msg(2)], "next-2"]];
+    const capped: InboxReader = {
+      async readChanges(_c, _s, onPage) {
+        for (const [m, cp] of pages) await onPage(m, cp);
+        throw new Error("exceeded page cap");
+      },
+    };
+    await expect(pollInbox(capped)).rejects.toThrow("page cap");
+    const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
+    expect(s.delta_link).toBe("next-2");
+    const resumed = fakeReader([[msg(3)]], "delta-done");
+    await pollInbox(resumed);
+    expect(resumed.calls).toEqual(["next-2"]);
+  });
+
+  it("an expired cursor restarts from the last 14 days, not the old saved start", async () => {
+    await pollInbox(fakeReader([[msg(1)]], "delta-1"), { since: new Date("2025-01-01T00:00:00Z") });
+    const seen: Date[] = [];
+    const expiring: InboxReader = {
+      async readChanges(cursor, since) {
+        seen.push(since);
+        if (cursor) throw new CursorExpiredError("gone");
+        return "delta-2";
+      },
+    };
+    await pollInbox(expiring);
+    expect(seen[0].toISOString()).toBe("2025-01-01T00:00:00.000Z"); // normal poll keeps the saved start
+    const ageDays = (Date.now() - seen[1].getTime()) / 86_400_000;
+    expect(ageDays).toBeGreaterThan(13.9);
+    expect(ageDays).toBeLessThan(14.1);
   });
 
   it("dry run stores nothing and keeps no cursor", async () => {
@@ -112,7 +183,7 @@ describe("GraphInbox", () => {
     const fetchFn = (async (url: string, init?: RequestInit) => {
       if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
       urls.push(url);
-      prefer.push((init?.headers as Record<string, string>).Prefer);
+      prefer.push(new Headers(init?.headers).get("Prefer") ?? undefined);
       return pages.shift()!;
     }) as unknown as typeof fetch;
     return { inbox: new GraphInbox(cfg, fetchFn), urls, prefer };

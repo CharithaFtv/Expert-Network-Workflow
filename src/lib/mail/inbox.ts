@@ -23,13 +23,14 @@ export class CursorExpiredError extends Error {}
 /** Where the poller reads from. Graph in production, a fake in tests. */
 export interface InboxReader {
   /**
-   * Walks every change after `cursor` (or after `since` when there is none), page by page. Returns the
-   * new cursor, which the caller saves only after every page was handled.
+   * Walks every change after `cursor` (or after `since` when there is none), page by page. `onPage`
+   * gets each page with `checkpoint`, a link the walk can safely resume from once the page is handled
+   * (null on the last page). Returns the final delta link.
    */
   readChanges(
     cursor: string | null,
     since: Date,
-    onPage: (messages: InboundMessage[]) => Promise<void>,
+    onPage: (messages: InboundMessage[], checkpoint: string | null) => Promise<void>,
   ): Promise<string>;
 }
 
@@ -81,14 +82,16 @@ export function toInboundMessage(m: GraphMessage): InboundMessage {
   };
 }
 
-const MAX_PAGES = 200; // a runaway nextLink loop must not run forever
+// A runaway nextLink loop must not run forever. Hitting the cap is not a stall: the caller has saved a
+// checkpoint after every page, so the next run carries on from where this one stopped.
+const MAX_PAGES = 200;
 
 /** Reads the Inbox through a Graph delta query using immutable message IDs. Needs Application Mail.Read. */
 export class GraphInbox extends GraphClient implements InboxReader {
   async readChanges(
     cursor: string | null,
     since: Date,
-    onPage: (messages: InboundMessage[]) => Promise<void>,
+    onPage: (messages: InboundMessage[], checkpoint: string | null) => Promise<void>,
   ): Promise<string> {
     let url =
       cursor ??
@@ -109,10 +112,11 @@ export class GraphInbox extends GraphClient implements InboxReader {
       };
       // Deletions arrive as "@removed" stubs; drafts are never mail we received.
       const live = json.value.filter((m) => !m["@removed"] && !m.isDraft).map(toInboundMessage);
-      if (live.length) await onPage(live);
+      const nextLink = json["@odata.nextLink"] ?? null;
+      if (live.length || nextLink) await onPage(live, nextLink);
       if (json["@odata.deltaLink"]) return json["@odata.deltaLink"];
-      if (!json["@odata.nextLink"]) throw new MailError("Graph delta ended without a deltaLink", "run");
-      url = json["@odata.nextLink"];
+      if (!nextLink) throw new MailError("Graph delta ended without a deltaLink", "run");
+      url = nextLink;
     }
     throw new MailError(`Graph delta exceeded ${MAX_PAGES} pages`, "run");
   }

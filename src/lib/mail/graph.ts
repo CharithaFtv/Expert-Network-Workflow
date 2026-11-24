@@ -80,15 +80,12 @@ export class GraphClient {
     if (new URL(url).host !== "graph.microsoft.com") {
       throw new MailError(`Refusing to call non-Graph URL: ${new URL(url).host}`, "run");
     }
-    const go = async () =>
-      this.call(url, {
-        ...init,
-        headers: {
-          Authorization: `Bearer ${await this.accessToken()}`,
-          "Content-Type": "application/json",
-          ...(init.headers as Record<string, string> | undefined),
-        },
-      });
+    const go = async () => {
+      const headers = new Headers(init.headers); // accepts a plain object, a Headers or pairs
+      headers.set("Authorization", `Bearer ${await this.accessToken()}`);
+      if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+      return this.call(url, { ...init, headers });
+    };
     let res = await go();
     if (res.status === 401) {
       this.token = undefined; // revoked or rotated early
