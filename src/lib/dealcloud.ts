@@ -156,6 +156,12 @@ export function getUser(id: string): Person | undefined {
   return load().usersById.get(id);
 }
 
+/** Maps a signed-in Microsoft account to the FTV directory. Unknown accounts get no access. */
+export function getUserByEmail(email: string): Person | undefined {
+  const e = email.trim().toLowerCase();
+  return load().users.find((u) => u.email === e);
+}
+
 export function listUsers(): Person[] {
   return load().users;
 }

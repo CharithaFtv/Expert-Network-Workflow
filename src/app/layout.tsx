@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { unreadCount } from "@/lib/projects";
-import { SESSION_COOKIE, currentUser } from "@/lib/session";
+import { currentUser, endSession } from "@/lib/session";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,8 +12,8 @@ export const metadata: Metadata = {
 
 async function signOut() {
   "use server";
-  (await cookies()).delete(SESSION_COOKIE);
-  redirect("/login");
+  await endSession();
+  redirect("/login?signedout=1");
 }
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
