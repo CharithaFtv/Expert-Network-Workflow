@@ -25,11 +25,11 @@ const TIMEOUT_MS = 20_000;
 /** HTTP statuses that mean this one message is bad, not that Graph or our credentials are. */
 const PERMANENT = new Set([400, 404, 413, 422]);
 
-/** Sends from one shared mailbox using the OAuth client-credentials flow. */
-export class GraphMailTransport implements MailTransport {
+/** Talks to one shared mailbox using the OAuth client-credentials flow. Sending and reading extend it. */
+export class GraphClient {
   private token?: { value: string; expiresAt: number };
 
-  private cfg: GraphConfig;
+  protected cfg: GraphConfig;
   private fetchFn: typeof fetch;
 
   constructor(cfg: GraphConfig, fetchFn: typeof fetch = fetch) {
@@ -68,13 +68,26 @@ export class GraphMailTransport implements MailTransport {
     return json.access_token;
   }
 
-  /** Authenticated call to the mailbox; a 401 refreshes the token and retries once. */
-  private async api(path: string, init: RequestInit): Promise<Response> {
-    const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.cfg.mailbox)}${path}`;
+  /**
+   * Authenticated call to the mailbox; a 401 refreshes the token and retries once. `path` is relative
+   * to the mailbox, or an absolute Graph URL (paging links). Any other host is refused so the token
+   * can never be sent anywhere else.
+   */
+  protected async api(path: string, init: RequestInit = {}): Promise<Response> {
+    const url = path.startsWith("https://")
+      ? path
+      : `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(this.cfg.mailbox)}${path}`;
+    if (new URL(url).host !== "graph.microsoft.com") {
+      throw new MailError(`Refusing to call non-Graph URL: ${new URL(url).host}`, "run");
+    }
     const go = async () =>
       this.call(url, {
         ...init,
-        headers: { Authorization: `Bearer ${await this.accessToken()}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${await this.accessToken()}`,
+          "Content-Type": "application/json",
+          ...(init.headers as Record<string, string> | undefined),
+        },
       });
     let res = await go();
     if (res.status === 401) {
@@ -84,6 +97,10 @@ export class GraphMailTransport implements MailTransport {
     return res;
   }
 
+}
+
+/** Sends from the shared mailbox. */
+export class GraphMailTransport extends GraphClient implements MailTransport {
   /**
    * Uses sendMail, which needs only Application Mail.Send on the shared mailbox (what Exchange
    * RBAC grants today). It returns an empty 202, so no thread IDs here: replies are matched by the
@@ -108,7 +125,7 @@ export class GraphMailTransport implements MailTransport {
   }
 }
 
-async function safeText(res: Response): Promise<string> {
+export async function safeText(res: Response): Promise<string> {
   try {
     return (await res.text()).slice(0, 500);
   } catch {
