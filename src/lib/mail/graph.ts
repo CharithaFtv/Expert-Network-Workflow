@@ -84,34 +84,27 @@ export class GraphMailTransport implements MailTransport {
     return res;
   }
 
-  private async fail(what: string, res: Response): Promise<never> {
-    const detail = `Graph ${what} failed: ${res.status} ${await safeText(res)}`;
-    throw new MailError(detail, PERMANENT.has(res.status) ? "permanent" : "run");
-  }
-
   /**
-   * sendMail returns 202 with no IDs, so we create a draft (which returns the thread IDs) and
-   * then send it. It is saved to Sent Items either way.
+   * Uses sendMail, which needs only Application Mail.Send on the shared mailbox (what Exchange
+   * RBAC grants today). It returns an empty 202, so no thread IDs here: replies are matched by the
+   * project code in the subject, and the inbound poller records the conversationId from the
+   * first reply it sees.
    */
   async send(mail: OutgoingMail): Promise<SendReceipt> {
-    const create = await this.api("/messages", {
+    const res = await this.api("/sendMail", {
       method: "POST",
       body: JSON.stringify({
-        subject: mail.subject,
-        body: { contentType: "Text", content: mail.body },
-        toRecipients: [{ emailAddress: { address: mail.to } }],
+        message: {
+          subject: mail.subject,
+          body: { contentType: "Text", content: mail.body },
+          toRecipients: [{ emailAddress: { address: mail.to } }],
+        },
+        saveToSentItems: true,
       }),
     });
-    if (create.status !== 201) return this.fail("create draft", create);
-    const draft = (await create.json()) as { id: string; conversationId?: string; internetMessageId?: string };
-
-    const sent = await this.api(`/messages/${encodeURIComponent(draft.id)}/send`, { method: "POST" });
-    if (sent.status !== 202) {
-      // Best effort: do not leave an orphan draft behind a failed send.
-      await this.api(`/messages/${encodeURIComponent(draft.id)}`, { method: "DELETE" }).catch(() => {});
-      return this.fail("send draft", sent);
-    }
-    return { conversationId: draft.conversationId, internetMessageId: draft.internetMessageId };
+    if (res.status === 202) return {};
+    const detail = `Graph sendMail failed: ${res.status} ${await safeText(res)}`;
+    throw new MailError(detail, PERMANENT.has(res.status) ? "permanent" : "run");
   }
 }
 
