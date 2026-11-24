@@ -24,6 +24,7 @@ const msg = (n: number, over: Partial<InboundMessage> = {}): InboundMessage => (
 function fakeReader(pages: InboundMessage[][], link = "delta-1"): InboxReader & { calls: (string | null)[] } {
   const calls: (string | null)[] = [];
   return {
+    name: "test/inbox",
     calls,
     async readChanges(cursor, _since, onPage) {
       calls.push(cursor);
@@ -41,6 +42,15 @@ describe("pollInbox", () => {
     expect(r).toEqual({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-1");
+  });
+
+  it("keeps a separate cursor for each mailbox", async () => {
+    await pollInbox({ ...fakeReader([[msg(1)]], "delta-A"), name: "a@x.com/inbox" });
+    const other = { ...fakeReader([[msg(2)]], "delta-B"), name: "b@x.com/inbox" };
+    await pollInbox(other);
+    expect(other.calls).toEqual([null]); // started fresh instead of reusing the cursor of mailbox A
+    const rows = await db.query<{ name: string }>("SELECT name FROM mailbox_sync ORDER BY name");
+    expect(rows.map((r) => r.name)).toEqual(["a@x.com/inbox", "b@x.com/inbox"]);
   });
 
   it("drops a repeated Graph ID and a repeated Message-ID", async () => {
@@ -63,6 +73,7 @@ describe("pollInbox", () => {
   it("keeps the old cursor when a page fails, and replays safely", async () => {
     await pollInbox(fakeReader([[msg(1)]], "delta-1"));
     const failing: InboxReader = {
+      name: "test/inbox",
       async readChanges(_c, _s, onPage) {
         await onPage([msg(2)], null);
         throw new Error("boom");
@@ -79,6 +90,7 @@ describe("pollInbox", () => {
     await pollInbox(fakeReader([[msg(1)]], "delta-1"));
     const calls: (string | null)[] = [];
     const expiring: InboxReader = {
+      name: "test/inbox",
       async readChanges(cursor, _s, onPage) {
         calls.push(cursor);
         if (cursor) throw new CursorExpiredError("gone");
@@ -142,6 +154,7 @@ describe("pollInbox", () => {
 
   it("does not hide a database outage as a bad message", async () => {
     const failing: InboxReader = {
+      name: "test/inbox",
       async readChanges(_c, _s, onPage) {
         await db.query("SELECT 1");
         await onPage([{ ...msg(1), receivedAt: undefined as unknown as string }], null); // NOT NULL violation (class 23)
@@ -154,6 +167,7 @@ describe("pollInbox", () => {
   it("saves a checkpoint after every page so a capped run resumes instead of restarting", async () => {
     const pages: [InboundMessage[], string | null][] = [[[msg(1)], "next-1"], [[msg(2)], "next-2"]];
     const capped: InboxReader = {
+      name: "test/inbox",
       async readChanges(_c, _s, onPage) {
         for (const [m, cp] of pages) await onPage(m, cp);
         throw new Error("exceeded page cap");
@@ -171,6 +185,7 @@ describe("pollInbox", () => {
     await pollInbox(fakeReader([[msg(1)]], "delta-1"), { since: new Date("2025-01-01T00:00:00Z") });
     const seen: Date[] = [];
     const expiring: InboxReader = {
+      name: "test/inbox",
       async readChanges(cursor, since) {
         seen.push(since);
         if (cursor) throw new CursorExpiredError("gone");
@@ -249,6 +264,10 @@ describe("GraphInbox", () => {
     const got: InboundMessage[] = [];
     await inbox.readChanges(null, new Date("2026-11-20T00:00:00Z"), async (p) => void got.push(...p));
     expect(got.map((m) => m.graphId)).toEqual(["new"]);
+  });
+
+  it("names its cursor after the mailbox and folder", () => {
+    expect(graph([]).inbox.name).toBe("testrequest@ftvcapital.com/inbox");
   });
 
   it("maps a 410 to CursorExpiredError", async () => {

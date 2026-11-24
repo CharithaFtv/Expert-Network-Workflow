@@ -22,6 +22,8 @@ export class CursorExpiredError extends Error {}
 
 /** Where the poller reads from. Graph in production, a fake in tests. */
 export interface InboxReader {
+  /** Identifies what is being followed (mailbox and folder). The saved cursor is keyed by it, so a different mailbox never reuses it. */
+  readonly name: string;
   /**
    * Walks every change after `cursor` (or the whole Inbox when there is none), page by page, and drops
    * messages received before `since`. `onPage`
@@ -89,6 +91,10 @@ const MAX_PAGES = 200;
 
 /** Reads the Inbox through a Graph delta query using immutable message IDs. Needs Application Mail.Read. */
 export class GraphInbox extends GraphClient implements InboxReader {
+  get name() {
+    return `${this.cfg.mailbox.toLowerCase()}/inbox`;
+  }
+
   async readChanges(
     cursor: string | null,
     since: Date,

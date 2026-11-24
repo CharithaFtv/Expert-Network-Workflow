@@ -1,7 +1,6 @@
 import { db } from "../db.ts";
 import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inbox.ts";
 
-const FOLDER = "inbox";
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
 export type PollResult = {
@@ -84,11 +83,11 @@ export async function storeInbound(m: InboundMessage): Promise<boolean> {
 /** Postgres data errors (SQLSTATE class 22) mean this one message cannot be stored, not that the database is down. */
 const isDataError = (e: unknown) => String((e as { code?: unknown }).code ?? "").startsWith("22");
 
-async function saveCursor(link: string, since: Date) {
+async function saveCursor(name: string, link: string, since: Date) {
   await db.query(
     `INSERT INTO mailbox_sync (name, delta_link, since, updated_at) VALUES ($1,$2,$3,$4)
      ON CONFLICT (name) DO UPDATE SET delta_link = $2, since = $3, updated_at = $4`,
-    [FOLDER, link, since.toISOString(), new Date().toISOString()],
+    [name, link, since.toISOString(), new Date().toISOString()],
   );
 }
 
@@ -106,7 +105,7 @@ export async function pollInbox(
 ): Promise<PollResult> {
   const [state] = await db.query<{ delta_link: string | null; since: string | null }>(
     "SELECT delta_link, since FROM mailbox_sync WHERE name = $1",
-    [FOLDER],
+    [reader.name],
   );
   const lookback = () => opts.since ?? new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * 86_400_000);
   // `since` only applies when reading from scratch; once a cursor exists it is kept as it was.
@@ -128,7 +127,7 @@ export async function pollInbox(
         result.failed.push(m.graphId);
       }
     }
-    if (checkpoint && !opts.dryRun) await saveCursor(checkpoint, since);
+    if (checkpoint && !opts.dryRun) await saveCursor(reader.name, checkpoint, since);
   };
 
   let next: string;
@@ -142,6 +141,6 @@ export async function pollInbox(
     next = await reader.readChanges(null, since, onPage);
   }
 
-  if (!opts.dryRun) await saveCursor(next, since);
+  if (!opts.dryRun) await saveCursor(reader.name, next, since);
   return result;
 }
