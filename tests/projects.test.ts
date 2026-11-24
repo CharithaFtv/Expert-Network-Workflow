@@ -64,6 +64,20 @@ describe("createProject", () => {
     }
   });
 
+  it("refuses a vendor with no intake email and saves nothing", async () => {
+    await db.query("UPDATE vendors SET intake_email = NULL WHERE id = 1");
+    await expect(create()).rejects.toThrow(/no intake email/);
+    expect(await count("projects")).toBe(0);
+    expect(await count("outbox")).toBe(0);
+  });
+
+  it("tags the vendor brief subject with the project code so replies can be matched", async () => {
+    const id = await created();
+    const [row] = await db.query<{ subject: string }>("SELECT subject FROM outbox WHERE kind = 'network-brief'");
+    const view = (await getProjectFor(id, ALICE))!;
+    expect(row.subject).toBe(`[${view.project.code}] Wholesale distributor software`);
+  });
+
   it("notifies each tagged person but not the requester", async () => {
     await created();
     expect(await listNotifications(BOB)).toHaveLength(1);

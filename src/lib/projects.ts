@@ -203,7 +203,8 @@ export async function createProject(
         "SELECT name, intake_email FROM vendors WHERE id = $1",
         [vid],
       );
-      await queue("network-brief", v.intake_email ?? v.name, input.title, networkBrief);
+      if (!v.intake_email) throw new Error(`Vendor ${v.name} has no intake email configured`);
+      await queue("network-brief", v.intake_email, `[${code}] ${input.title}`, networkBrief);
     }
     return pid;
   });

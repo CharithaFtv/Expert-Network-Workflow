@@ -1,39 +1,89 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { GraphMailTransport } from "@/lib/mail/graph";
-import { drainOutbox } from "@/lib/mail/sender";
-import type { MailTransport } from "@/lib/mail/transport";
+import { mailMode } from "@/lib/mail";
+import { drainOutbox, requeueFailed } from "@/lib/mail/sender";
+import { MailError, type MailTransport } from "@/lib/mail/transport";
 import { resetDb } from "./helpers";
 
 const cfg = { tenantId: "t", clientId: "c", clientSecret: "s", mailbox: "box@x.com" };
 
+const tokenRes = () => new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }));
+const DRAFT = { id: "AAMk=draft-1", conversationId: "conv-1", internetMessageId: "<m1@x.com>" };
+
+/** Fake Graph: token endpoint, create-draft, send-draft, delete-draft. Each status can be overridden. */
+function graph(o: { draft?: number | (() => number); send?: number; token?: () => Response } = {}) {
+  const f = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("oauth2")) return o.token ? o.token() : tokenRes();
+    if (init?.method === "DELETE") return new Response(null, { status: 204 });
+    if (u.endsWith("/send")) return new Response(o.send === 202 || o.send === undefined ? null : "x", { status: o.send ?? 202 });
+    const status = typeof o.draft === "function" ? o.draft() : (o.draft ?? 201);
+    return status === 201 ? new Response(JSON.stringify(DRAFT), { status }) : new Response("x", { status });
+  });
+  return f;
+}
+const urls = (f: ReturnType<typeof vi.fn>) => (f.mock.calls as unknown as [string, RequestInit][]).map(([u, i]) => `${i?.method ?? "GET"} ${u}`);
+const mail = { to: "a@b.com", subject: "s", body: "b" };
+
 describe("GraphMailTransport", () => {
-  it("gets a token, then posts sendMail to the shared mailbox", async () => {
-    const f = vi.fn(async (url: string | URL | Request) =>
-      String(url).includes("oauth2")
-        ? new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }))
-        : new Response(null, { status: 202 }),
-    );
+  it("creates a draft in the shared mailbox, sends it, and returns the thread ids", async () => {
+    const f = graph();
     const t = new GraphMailTransport(cfg, f as unknown as typeof fetch);
-    await t.send({ to: "a@b.com", subject: "Hi", body: "Body" });
+    const receipt = await t.send({ to: "a@b.com", subject: "Hi", body: "Body" });
     await t.send({ to: "a@b.com", subject: "Hi2", body: "Body" });
 
+    expect(receipt).toEqual({ conversationId: "conv-1", internetMessageId: "<m1@x.com>" });
     const calls = f.mock.calls as unknown as [string, RequestInit][];
-    expect(calls.filter(([u]) => u.includes("oauth2")).length).toBe(1); // token cached
-    const [url, init] = calls[1];
-    expect(url).toBe("https://graph.microsoft.com/v1.0/users/box%40x.com/sendMail");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
-    expect(JSON.parse(init.body as string).message.toRecipients[0].emailAddress.address).toBe("a@b.com");
+    expect(urls(f).filter((u) => u.includes("oauth2")).length).toBe(1); // token cached
+    const create = calls.find(([u]) => u.endsWith("/messages"))!;
+    expect(create[0]).toBe("https://graph.microsoft.com/v1.0/users/box%40x.com/messages");
+    expect((create[1].headers as Record<string, string>).Authorization).toBe("Bearer tok");
+    expect(JSON.parse(create[1].body as string).toRecipients[0].emailAddress.address).toBe("a@b.com");
+    expect(urls(f)).toContain(`POST https://graph.microsoft.com/v1.0/users/box%40x.com/messages/${encodeURIComponent(DRAFT.id)}/send`);
   });
 
-  it("throws on a non-202 response", async () => {
-    const f = vi.fn(async (url: string | URL | Request) =>
-      String(url).includes("oauth2")
-        ? new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }))
-        : new Response("denied", { status: 403 }),
-    );
+  it("throws on a failed create, and removes the draft if the send fails", async () => {
+    await expect(new GraphMailTransport(cfg, graph({ draft: 403 }) as unknown as typeof fetch).send(mail)).rejects.toThrow(/403/);
+    const f = graph({ send: 500 });
+    await expect(new GraphMailTransport(cfg, f as unknown as typeof fetch).send(mail)).rejects.toThrow(/500/);
+    expect(urls(f).some((u) => u.startsWith("DELETE"))).toBe(true);
+  });
+});
+
+describe("GraphMailTransport resilience", () => {
+  it("retries once with a fresh token after a 401", async () => {
+    let n = 0;
+    const f = graph({ draft: () => (++n === 1 ? 401 : 201) });
+    await new GraphMailTransport(cfg, f as unknown as typeof fetch).send(mail);
+    expect(urls(f).filter((u) => u.includes("oauth2")).length).toBe(2);
+  });
+
+  it("classifies errors: 400 permanent; 403, 429, token failure and network errors run-level", async () => {
+    const kind = (f: typeof fetch) =>
+      new GraphMailTransport(cfg, f).send(mail).catch((e) => (e as MailError).kind);
+    expect(await kind(graph({ draft: 400 }) as unknown as typeof fetch)).toBe("permanent");
+    expect(await kind(graph({ draft: 403 }) as unknown as typeof fetch)).toBe("run");
+    expect(await kind(graph({ draft: 429 }) as unknown as typeof fetch)).toBe("run");
+    expect(await kind(graph({ send: 400 }) as unknown as typeof fetch)).toBe("permanent");
+    expect(await kind((async () => new Response("bad", { status: 401 })) as typeof fetch)).toBe("run");
+    expect(await kind((async () => Promise.reject(new Error("socket hang up"))) as typeof fetch)).toBe("run");
+  });
+
+  it("falls back to a default token lifetime when expires_in is missing", async () => {
+    const f = graph({ token: () => new Response(JSON.stringify({ access_token: "tok" })) });
     const t = new GraphMailTransport(cfg, f as unknown as typeof fetch);
-    await expect(t.send({ to: "a@b.com", subject: "s", body: "b" })).rejects.toThrow(/403/);
+    await t.send(mail);
+    await t.send(mail);
+    expect(urls(f).filter((u) => u.includes("oauth2")).length).toBe(1);
+  });
+});
+
+describe("mailMode", () => {
+  it("defaults to log and rejects unknown values", () => {
+    expect(mailMode({})).toBe("log");
+    expect(mailMode({ MAIL_MODE: "graph" })).toBe("graph");
+    expect(() => mailMode({ MAIL_MODE: "grpah" })).toThrow(/MAIL_MODE/);
   });
 });
 
@@ -50,12 +100,21 @@ describe("drainOutbox", () => {
     await queue("a@x.com");
     const sent: string[] = [];
     const t: MailTransport = { send: async (m) => void sent.push(m.to) };
-    expect(await drainOutbox(t)).toEqual({ sent: 1, failed: 0, retried: 0 });
+    expect(await drainOutbox(t)).toEqual({ sent: 1, failed: 0, retried: 0, stuck: 0 });
     expect(sent).toEqual(["a@x.com"]);
     const [row] = await db.query<{ status: string; sent_at: string }>("SELECT status, sent_at FROM outbox");
     expect(row.status).toBe("Sent");
     expect(row.sent_at).toBeTruthy();
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 0 }); // nothing sent twice
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 0, stuck: 0 }); // nothing sent twice
+  });
+
+  it("stores the thread ids returned by the transport", async () => {
+    await queue("a@x.com");
+    await drainOutbox({ send: async () => ({ conversationId: "conv-9", internetMessageId: "<z@x>" }) });
+    const [row] = await db.query<{ conversation_id: string; internet_message_id: string }>(
+      "SELECT conversation_id, internet_message_id FROM outbox",
+    );
+    expect(row).toEqual({ conversation_id: "conv-9", internet_message_id: "<z@x>" });
   });
 
   it("redirects every email when redirectTo is set", async () => {
@@ -69,12 +128,63 @@ describe("drainOutbox", () => {
   it("retries then marks Failed after 3 attempts", async () => {
     await queue("a@x.com");
     const t: MailTransport = { send: async () => Promise.reject(new Error("boom")) };
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 1 });
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 0, retried: 1, stuck: 0 });
     await drainOutbox(t);
-    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 1, retried: 0 });
+    expect(await drainOutbox(t)).toEqual({ sent: 0, failed: 1, retried: 0, stuck: 0 });
     const [row] = await db.query<{ status: string; attempts: number; last_error: string }>(
       "SELECT status, attempts, last_error FROM outbox",
     );
     expect(row).toMatchObject({ status: "Failed", attempts: 3, last_error: "boom" });
+  });
+
+  it("a run-level error stops the run, charges no attempts and leaves rows Queued", async () => {
+    await queue("a@x.com");
+    await queue("b@x.com");
+    const t: MailTransport = { send: async () => Promise.reject(new MailError("auth down", "run")) };
+    const r = await drainOutbox(t);
+    expect(r).toMatchObject({ sent: 0, failed: 0, retried: 0, aborted: "auth down" });
+    const rows = await db.query<{ status: string; attempts: number }>("SELECT status, attempts FROM outbox ORDER BY id");
+    expect(rows).toEqual([
+      { status: "Queued", attempts: 0 },
+      { status: "Queued", attempts: 0 },
+    ]);
+  });
+
+  it("a permanent error fails the message at once", async () => {
+    await queue("bad");
+    const t: MailTransport = { send: async () => Promise.reject(new MailError("invalid address", "permanent")) };
+    expect(await drainOutbox(t)).toMatchObject({ failed: 1 });
+    const [row] = await db.query<{ status: string; attempts: number }>("SELECT status, attempts FROM outbox");
+    expect(row).toEqual({ status: "Failed", attempts: 1 });
+  });
+
+  it("never resends a message whose result could not be recorded", async () => {
+    await queue("a@x.com");
+    let sends = 0;
+    const t: MailTransport = {
+      send: async () => {
+        sends++;
+        // Simulate the database failing right after delivery.
+        await db.query("ALTER TABLE outbox ADD CONSTRAINT t_nosent CHECK (status <> 'Sent')");
+      },
+    };
+    try {
+      await expect(drainOutbox(t)).rejects.toThrow();
+    } finally {
+      await db.query("ALTER TABLE outbox DROP CONSTRAINT t_nosent");
+    }
+    const again = await drainOutbox(t);
+    expect(sends).toBe(1);
+    expect(again.stuck).toBe(1);
+    const [row] = await db.query<{ status: string }>("SELECT status FROM outbox");
+    expect(row.status).toBe("Sending");
+  });
+
+  it("requeueFailed puts Failed rows back with a fresh attempt count", async () => {
+    await queue("a@x.com");
+    await drainOutbox({ send: async () => Promise.reject(new MailError("nope", "permanent")) });
+    expect(await requeueFailed()).toBe(1);
+    const [row] = await db.query<{ status: string; attempts: number }>("SELECT status, attempts FROM outbox");
+    expect(row).toEqual({ status: "Queued", attempts: 0 });
   });
 });
