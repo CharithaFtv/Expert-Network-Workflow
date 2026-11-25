@@ -208,6 +208,9 @@ function checkText(raw: unknown, field: string, c: Ctx): Field<string> | undefin
   return { value, confidence: clamp01(raw.confidence), quote: raw.quote.trim() };
 }
 
+const CURRENCY_CODES = new Set([
+  "USD", "EUR", "GBP", "CAD", "AUD", "NZD", "CHF", "SEK", "NOK", "DKK", "JPY", "CNY", "INR", "SGD", "HKD", "ILS", "AED", "ZAR", "BRL", "MXN", "PLN",
+]);
 const CURRENCY_MARKS: [RegExp, string][] = [
   [/\$|\busd\b|\bdollars?\b/, "USD"],
   [/£|\bgbp\b|\bpounds?\b/, "GBP"],
@@ -243,8 +246,11 @@ function checkRate(raw: unknown, c: Ctx): Rate | undefined {
   if (!numberInQuote(raw.amount, raw.quote)) return void drop(c, "rate", "the amount is not in its quote");
   // The currency and unit must agree with what the quote says, when it says anything about them.
   const q = forQuote(raw.quote);
-  const currencies = CURRENCY_MARKS.filter(([re]) => re.test(q)).map(([, code]) => code);
-  if (currencies.length && !currencies.includes(raw.currency)) return void drop(c, "rate", "the currency does not match its quote");
+  // An explicit code in the quote ("600 CAD") decides; otherwise a symbol or word. With neither, there is no evidence.
+  const codes = [...q.matchAll(/\b([a-z]{3})\b/g)].map((m) => m[1].toUpperCase()).filter((x) => CURRENCY_CODES.has(x));
+  const currencies = codes.length ? codes : CURRENCY_MARKS.filter(([re]) => re.test(q)).map(([, code]) => code);
+  if (!currencies.length) return void drop(c, "rate", "the quote does not show the currency");
+  if (!currencies.includes(raw.currency)) return void drop(c, "rate", "the currency does not match its quote");
   let unit = typeof raw.unit === "string" && (RATE_UNITS as readonly string[]).includes(raw.unit) ? raw.unit : undefined;
   const units = UNIT_MARKS.filter(([re]) => re.test(q)).map(([, u]) => u);
   if (unit && units.length && !units.includes(unit)) unit = undefined; // keep the amount, lose a unit the quote contradicts
@@ -277,9 +283,14 @@ function checkRoles(raw: unknown, c: Ctx): PastRole[] | undefined {
 
 /** Every word of a name must appear in the email: a name is never invented. */
 function nameInSource(name: string, normSource: string): boolean {
-  const words = forQuote(name).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 2);
-  const sourceWords = new Set(normSource.split(/[^\p{L}\p{N}]+/u));
-  return words.length > 0 && words.every((w) => sourceWords.has(w));
+  // The whole name, in order, with initials and digits ("Expert 3" is not "Expert 9"), as one run of words:
+  // words borrowed from two different people ("Jane Doe", "John Smith") do not make "Jane Smith". "Last, First" is accepted.
+  const split = (s: string) => forQuote(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const words = split(name);
+  if (!words.length) return false;
+  const hay = ` ${split(normSource).join(" ")} `;
+  if (hay.includes(` ${words.join(" ")} `)) return true;
+  return words.length === 2 && hay.includes(` ${words[1]} ${words[0]} `);
 }
 
 export type Extraction = { candidates: Candidate[]; dropped: Dropped[] };

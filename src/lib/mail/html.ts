@@ -59,7 +59,7 @@ const ENTITIES: Record<string, string> = {
   ecirc: "ê", euml: "ë", igrave: "ì", iacute: "í", icirc: "î", iuml: "ï", ntilde: "ñ", ograve: "ò", oacute: "ó",
   ocirc: "ô", otilde: "õ", ouml: "ö", oslash: "ø", ugrave: "ù", uacute: "ú", ucirc: "û", uuml: "ü", yacute: "ý",
   szlig: "ß", Agrave: "À", Aacute: "Á", Acirc: "Â", Auml: "Ä", Aring: "Å", Ccedil: "Ç", Egrave: "È", Eacute: "É",
-  Ntilde: "Ñ", Ouml: "Ö", Uuml: "Ü", ensp: " ", emsp: " ", thinsp: " ", zwnj: "", zwj: "", shy: "",
+  Ntilde: "Ñ", Ouml: "Ö", Uuml: "Ü", ensp: " ", emsp: " ", thinsp: " ", zwnj: "‌", zwj: "‍", shy: "",
 };
 
 export function decodeEntities(s: string): string {
@@ -183,13 +183,19 @@ function parse(html: string, info: HtmlInfo): El {
       continue;
     }
     if (VOID.has(tag) || selfClose) continue;
-    if (stack.length < MAX_DEPTH) stack.push(el);
+    if (stack.length >= MAX_DEPTH) {
+      // Too deep to keep the structure. Flattening would turn the contents into siblings and could expose
+      // text from a hidden or quoted ancestor, so stop here: what follows is not read.
+      info.nodeLimitHit = true;
+      break;
+    }
+    stack.push(el);
   }
   return root;
 }
 
 const HIDDEN_STYLE =
-  /display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|opacity\s*:\s*0(?:\.0*)?\s*(?:;|$)|font-size\s*:\s*0(?:\.0*)?(?:px|pt|em|rem|%)?\s*(?:;|!|$)|(?:max-)?height\s*:\s*0(?:px|pt)?\s*(?:;|!|$)[^"]*overflow\s*:\s*hidden/i;
+  /display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|opacity\s*:\s*0(?:\.0*)?\s*(?:;|!|$)|font-size\s*:\s*0(?:\.0*)?(?:px|pt|em|rem|%)?\s*(?:;|!|$)|(?:max-)?height\s*:\s*0(?:px|pt)?\s*(?:;|!|$)[^"]*overflow\s*:\s*hidden/i;
 
 const isHidden = (el: El) =>
   "hidden" in el.attrs || (el.attrs.style !== undefined && HIDDEN_STYLE.test(el.attrs.style));

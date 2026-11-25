@@ -18,7 +18,7 @@ export type Provider = "anthropic" | "openai";
 
 /** Which provider's API to call. Explicit: it never guesses from which keys happen to be set. */
 export function extractionProvider(env: Env = process.env): Provider {
-  const v = (env.EXTRACT_PROVIDER ?? "anthropic").trim().toLowerCase();
+  const v = (env.EXTRACT_PROVIDER?.trim() || "anthropic").toLowerCase(); // empty means the default
   if (v === "anthropic" || v === "openai") return v;
   throw new Error(`EXTRACT_PROVIDER must be "anthropic" or "openai", not "${v}".`);
 }

@@ -215,6 +215,21 @@ export async function decide(
 }
 
 /**
+ * Removes what the model made of a message. An extraction with no confirmed candidate goes whole. Where a
+ * person has confirmed one, that candidate stays (it is their work) but the unconfirmed ones and the raw
+ * model answers go, so nothing untrusted or stale stays eligible for matching.
+ */
+async function dropModelOutput(q: { query: (text: string, params?: unknown[]) => Promise<unknown[]> }, id: number) {
+  await q.query(
+    `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
+       (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
+    [id],
+  );
+  await q.query("DELETE FROM extracted_candidates WHERE message_id = $1 AND review_status <> 'Confirmed'", [id]);
+  await q.query("UPDATE extractions SET raw = NULL WHERE message_id = $1", [id]);
+}
+
+/**
  * Writes the outcome. The retention date always follows the project the message is on now (none if it
  * has no project or the project is not closed), so a re-assigned message never keeps another project's
  * date. A message that is no longer Matched loses its stored attachments: untrusted mail keeps no files.
@@ -247,11 +262,7 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
       await q.query("DELETE FROM inbound_attachments WHERE message_id = $1", [id]);
       await q.query("DELETE FROM inbound_links WHERE message_id = $1", [id]);
       // What the model made of it goes too, unless a person has already confirmed a candidate from it.
-      await q.query(
-        `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
-           (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
-        [id],
-      );
+      await dropModelOutput(q, id);
       await q.query(
         `UPDATE inbound_messages
          SET attachments_fetched_at = NULL, attachments_attempts = 0, attachments_error = NULL,
@@ -263,11 +274,7 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
     } else if (moved) {
       // Still verified, but on another project or vendor: what the model made of it belonged to the old one.
       // Drop it (unless a person confirmed a candidate) so extraction runs again for the new project.
-      await q.query(
-        `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
-           (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
-        [id],
-      );
+      await dropModelOutput(q, id);
       await q.query("UPDATE inbound_messages SET extraction_attempts = 0, extraction_error = NULL WHERE id = $1", [id]);
     }
     return true;

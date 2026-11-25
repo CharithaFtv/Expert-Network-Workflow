@@ -67,7 +67,9 @@ describe("htmlToText", () => {
 
   it("is bounded in depth, size and node count", () => {
     const deep = "<div>".repeat(5000) + "deep" + "</div>".repeat(5000);
-    expect(text(deep)).toContain("deep");
+    // Past the depth limit the rest is not read, rather than flattened (flattening could expose hidden text).
+    expect(htmlToText(deep).info.nodeLimitHit).toBe(true);
+    expect(text(deep)).not.toContain("deep");
     const many = htmlToText("<b>x</b>".repeat(250_000));
     expect(many.info.nodeLimitHit).toBe(true);
     const big = htmlToText("a".repeat(MAX_INPUT_CHARS + 10));

@@ -1,6 +1,6 @@
 import { closeDb, db } from "../src/lib/db.ts";
 import { extractionClientFromEnv, extractionMode } from "../src/lib/ai/config.ts";
-import { extractPending, MAX_EXTRACTION_TRIES } from "../src/lib/ai/extract.ts";
+import { extractPending, pendingMessages, prepareInput } from "../src/lib/ai/extract.ts";
 import { CLASSIFY_SYSTEM, EXTRACT_SYSTEM, neutralise, PROMPT_VERSION, userMessage } from "../src/lib/ai/prompts.ts";
 
 // Usage:
@@ -30,21 +30,14 @@ try {
       ),
     );
   } else if (args.includes("--preview")) {
-    const [m] = await db.query<{ id: number; text_clean: string; hosts: string[] | null }>(
-      `SELECT m.id, m.text_clean, (SELECT array_agg(DISTINCT l.host) FROM inbound_links l WHERE l.message_id = m.id) AS hosts
-       FROM inbound_messages m LEFT JOIN extractions e ON e.message_id = m.id
-       WHERE m.status = 'Matched' AND m.cleaned_at IS NOT NULL AND m.purged_at IS NULL AND m.text_clean IS NOT NULL
-         AND m.project_id IS NOT NULL AND e.id IS NULL AND m.extraction_attempts < $1
-       ORDER BY m.extraction_attempts, m.id LIMIT 1`,
-      [MAX_EXTRACTION_TRIES],
-    );
+    const [m] = await pendingMessages(1);
     if (!m) {
       console.log("no verified reply is waiting for extraction");
     } else {
       console.log(`--- message ${m.id}. Nothing below has been sent anywhere. ---\n`);
       console.log(`SYSTEM (step 1, classify):\n${CLASSIFY_SYSTEM}\n`);
       console.log(`SYSTEM (step 2, extract, only for expert proposals and updates):\n${EXTRACT_SYSTEM}\n`);
-      console.log(`USER (the same text goes to both steps):\n${userMessage(neutralise(m.text_clean), m.hosts ?? [])}`);
+      console.log(`USER (the same text goes to both steps):\n${userMessage(prepareInput(m.text_clean).text, m.hosts ?? [])}`);
     }
   } else {
     if (args.includes("--retry-manual")) {

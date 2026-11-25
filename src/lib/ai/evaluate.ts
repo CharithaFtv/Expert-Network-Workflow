@@ -58,12 +58,16 @@ export function scoreCase(c: EvalCase, out: PipelineOutcome): CaseScore {
   const categoryOk = !!category && c.expect.categories.includes(category);
   const expected = c.expect.candidates ?? [];
 
-  const byName = new Map(got.map((g) => [normName(g.name.value), g]));
+  const used = new Set<number>(); // each returned candidate answers at most one expected one
   const details: CaseScore["details"] = [];
   let found = 0;
   for (const e of expected) {
-    const g = byName.get(normName(e.name));
-    if (!g) continue;
+    const same = got.map((x, i) => [x, i] as const).filter(([x, i]) => !used.has(i) && normName(x.name.value) === normName(e.name));
+    // Among candidates with that name, prefer the one whose employer is right, so a wrong duplicate is the extra.
+    const pick = same.find(([x]) => e.employer === undefined || (e.employer === null ? !x.current_employer : normEmployer(x.current_employer?.value) === normEmployer(e.employer))) ?? same[0];
+    if (!pick) continue;
+    used.add(pick[1]);
+    const g = pick[0];
     found++;
     if (e.employer !== undefined) {
       const ok = e.employer === null ? !g.current_employer : normEmployer(g.current_employer?.value) === normEmployer(e.employer);
@@ -77,9 +81,8 @@ export function scoreCase(c: EvalCase, out: PipelineOutcome): CaseScore {
     if (e.years !== undefined) details.push({ field: `${e.name}: years`, ok: g.years_experience?.value === e.years });
     if (e.rate) details.push({ field: `${e.name}: rate`, ok: g.rate?.amount === e.rate.amount && g.rate?.currency === e.rate.currency });
   }
-  const expectedNames = new Set(expected.map((e) => normName(e.name)));
-  const extras = got.filter((g) => !expectedNames.has(normName(g.name.value))).map((g) => g.name.value);
-  const forbiddenHit = (c.expect.forbidden ?? []).filter((f) => byName.has(normName(f)));
+  const extras = got.filter((_, i) => !used.has(i)).map((g) => g.name.value);
+  const forbiddenHit = (c.expect.forbidden ?? []).filter((f) => got.some((g) => normName(g.name.value) === normName(f)));
   const dropped = out.outcome === "extracted" ? out.extraction.dropped.length : 0;
   const recall = expected.length ? found / expected.length : null;
 

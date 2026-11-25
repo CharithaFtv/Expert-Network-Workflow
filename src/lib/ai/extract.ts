@@ -185,12 +185,9 @@ type Pending = {
   hosts: string[] | null;
 };
 
-export async function extractPending(
-  client: ModelClient,
-  opts: { limit?: number; sleep?: (ms: number) => Promise<void> } = {},
-): Promise<ExtractCounts> {
-  const counts: ExtractCounts = { messages: 0, candidates: 0, classifiedOnly: 0, manual: 0, deferred: 0, aborted: null, errors: [] };
-  const rows = await db.query<Pending>(
+/** The messages waiting for extraction, in the order they are tried. Shared by the run and by --preview. */
+export async function pendingMessages(limit = PER_RUN_LIMIT): Promise<Pending[]> {
+  return db.query<Pending>(
     `SELECT m.id, m.project_id, m.vendor_id, m.text_clean, m.extraction_attempts,
             (SELECT array_agg(DISTINCT l.host) FROM inbound_links l WHERE l.message_id = m.id) AS hosts
      FROM inbound_messages m
@@ -198,14 +195,26 @@ export async function extractPending(
      WHERE m.status = 'Matched' AND m.cleaned_at IS NOT NULL AND m.purged_at IS NULL AND m.text_clean IS NOT NULL
        AND m.project_id IS NOT NULL AND e.id IS NULL AND m.extraction_attempts < $2
      ORDER BY m.extraction_attempts, m.id LIMIT $1`,
-    [opts.limit ?? PER_RUN_LIMIT, MAX_EXTRACTION_TRIES],
+    [limit, MAX_EXTRACTION_TRIES],
   );
+}
+
+/** The text the model sees is exactly the text the quotes are checked against. */
+export function prepareInput(textClean: string): { text: string; truncated: boolean } {
+  const full = neutralise(textClean);
+  const text = full.length > MAX_INPUT_CHARS ? full.slice(0, MAX_INPUT_CHARS) : full;
+  return { text, truncated: text.length !== full.length };
+}
+
+export async function extractPending(
+  client: ModelClient,
+  opts: { limit?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<ExtractCounts> {
+  const counts: ExtractCounts = { messages: 0, candidates: 0, classifiedOnly: 0, manual: 0, deferred: 0, aborted: null, errors: [] };
+  const rows = await pendingMessages(opts.limit);
 
   for (const m of rows) {
-    // The text the model sees is exactly the text the quotes are checked against.
-    const full = neutralise(m.text_clean);
-    const text = full.length > MAX_INPUT_CHARS ? full.slice(0, MAX_INPUT_CHARS) : full;
-    const truncated = text.length !== full.length;
+    const { text, truncated } = prepareInput(m.text_clean);
 
     if (!text.trim()) {
       if (await record(m, text, truncated, client, { kind: "skipped" })) counts.messages++;
@@ -222,12 +231,15 @@ export async function extractPending(
     if (out.outcome === "deferred") {
       counts.deferred++;
       const tries = m.extraction_attempts + 1;
-      await db.query("UPDATE inbound_messages SET extraction_attempts = $2, extraction_error = $3 WHERE id = $1", [
-        m.id,
-        tries,
-        out.error.message.slice(0, 500),
-      ]);
-      if (tries >= MAX_EXTRACTION_TRIES) {
+      // Only if the message is still the one that was read: a re-clean or reassignment resets the count, and
+      // this must not put a stale one back.
+      const bumped = await db.query(
+        `UPDATE inbound_messages SET extraction_attempts = $2, extraction_error = $3
+         WHERE id = $1 AND extraction_attempts = $4 AND text_clean = $5 AND status = 'Matched'
+           AND project_id IS NOT DISTINCT FROM $6 AND vendor_id IS NOT DISTINCT FROM $7 RETURNING id`,
+        [m.id, tries, out.error.message.slice(0, 500), m.extraction_attempts, m.text_clean, m.project_id, m.vendor_id],
+      );
+      if (bumped.length && tries >= MAX_EXTRACTION_TRIES) {
         const reason = `the model could not be reached after ${tries} tries: ${out.error.message}`;
         if (await record(m, text, truncated, client, { kind: "manual", reason, calls: out.calls, dropped: [], classification: null })) {
           counts.messages++;
@@ -261,6 +273,8 @@ type Recorded =
 async function record(m: Pending, shown: string, truncated: boolean, client: ModelClient, r: Recorded): Promise<boolean> {
   const now = new Date().toISOString();
   return tx(async (q) => {
+    // Lock order matches closing a project and matching mail: the project first, then the message.
+    await q.query("SELECT 1 FROM projects WHERE id = $1 FOR SHARE", [m.project_id]);
     // The model took a while; check that the message is still verified and its clean text is the text it read.
     const [cur] = await q.query<{ ok: boolean }>(
       `SELECT (status = 'Matched' AND purged_at IS NULL AND text_clean = $2

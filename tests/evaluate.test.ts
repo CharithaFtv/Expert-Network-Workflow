@@ -126,4 +126,26 @@ describe("the evaluation set", () => {
     expect(s.recall).toBe(0.5); // Tom Okafor was missed
     expect(s.details.some((d) => !d.ok)).toBe(true);
   });
+
+  it("counts a wrong-employer duplicate as an extra, not as a second match", async () => {
+    const c = cases.find((x) => x.id === "two-named-experts")!;
+    const model: ModelClient = {
+      model: "dup",
+      async complete(req) {
+        const text = req.system === CLASSIFY_SYSTEM
+          ? JSON.stringify({ category: "expert_candidates", confidence: 1, reason: "x" })
+          : JSON.stringify({
+              candidates: [
+                { name: f("Maria Lindqvist"), current_employer: f("Northwind Foods") },
+                { name: f("Maria Lindqvist"), current_employer: f("Contoso Retail", "Contoso Retail") },
+                { name: f("Tom Okafor") },
+              ],
+            });
+        return { text, model: "dup", stopReason: "end_turn", requestId: null, usage: { input: 0, output: 0, cacheRead: 0 } };
+      },
+    };
+    const s = scoreCase(c, await runPipeline(model, { text: c.text, linkHosts: [] }, { sleep: async () => {} }));
+    expect(s.extras.length).toBe(1);
+    expect(s.passed).toBe(false);
+  });
 });

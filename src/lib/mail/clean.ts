@@ -147,10 +147,16 @@ export function cleanMessage(input: { bodyType: "html" | "text"; body: string; s
   const forward = isForward(input.subject);
   let text: string;
   let htmlQuoted = "";
+  let htmlCutSkipped = false;
   let anchors: Link[] = [];
   let base: HtmlInfo = { hiddenChars: 0, quoteMarker: null, truncatedInput: false, nodeLimitHit: false };
   if (input.bodyType === "html") {
-    const r = htmlToText(input.body, { isForward: forward });
+    let r = htmlToText(input.body, { isForward: forward });
+    if (!r.clean.trim() && r.quoted.trim() && !forward) {
+      // The whole body sat inside a quote block: never empty a message. Read it again without cutting.
+      r = htmlToText(input.body, { isForward: true });
+      htmlCutSkipped = true;
+    }
     text = r.clean;
     htmlQuoted = r.quoted;
     anchors = r.links;
@@ -188,7 +194,7 @@ export function cleanMessage(input: { bodyType: "html" | "text"; body: string; s
       ...base,
       source: input.bodyType,
       quoteCut: base.quoteMarker ?? q.marker,
-      quoteCutSkipped: q.skipped,
+      quoteCutSkipped: q.skipped || htmlCutSkipped,
       signatureCut: sig.marker,
       truncatedOutput,
     },
