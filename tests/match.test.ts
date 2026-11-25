@@ -249,6 +249,30 @@ describe("assignToProject", () => {
     expect(await outcome(bad)).toMatchObject({ status: "Unverified", project_id: p.id, match_method: "manual" });
   });
 
+  it("drops what the model made of a message when it moves to another project, so it is extracted again there", async () => {
+    const a = await project();
+    const b = await project();
+    const id = await inbound({ subject: `[${a.code}] x` });
+    await matchPending();
+    await db.query("UPDATE inbound_messages SET text_clean = 'x', cleaned_at = now(), extraction_attempts = 2 WHERE id = $1", [id]);
+    const [ex] = await db.query<{ id: number }>(
+      `INSERT INTO extractions (message_id, status, model, prompt_version, input_chars, truncated, audit, created_at)
+       VALUES ($1,'Extracted','m','p',1,false,'{}', now()) RETURNING id`,
+      [id],
+    );
+    await db.query(
+      `INSERT INTO extracted_candidates (extraction_id, message_id, project_id, vendor_id, position, data, name_norm, employer_norm, match_status, matches, created_at)
+       VALUES ($1,$2,$3,1,0,'{}','n','e','New','{}', now())`,
+      [ex.id, id, a.id],
+    );
+    await assignToProject(id, b.id);
+    expect(await outcome(id)).toMatchObject({ status: "Matched", project_id: b.id });
+    expect(await db.query("SELECT 1 FROM extractions WHERE message_id = $1", [id])).toHaveLength(0);
+    expect(await db.query("SELECT 1 FROM extracted_candidates WHERE message_id = $1", [id])).toHaveLength(0);
+    const [m] = await db.query<{ extraction_attempts: number }>("SELECT extraction_attempts FROM inbound_messages WHERE id = $1", [id]);
+    expect(m.extraction_attempts).toBe(0);
+  });
+
   it("refuses a missing message or project", async () => {
     const p = await project();
     await expect(assignToProject(99999, p.id)).rejects.toThrow(/No inbound message/);

@@ -28,7 +28,7 @@ import {
  */
 export const MAX_INPUT_CHARS = 30_000;
 /** Poll runs that may fail to reach the model for one message before it is marked for manual entry. */
-export const MAX_EXTRACTION_TRIES = 3;
+export const MAX_EXTRACTION_TRIES = 5;
 const PER_RUN_LIMIT = 20;
 
 export type CallAudit = {
@@ -107,6 +107,7 @@ export async function runPipeline(
   const calls: CallAudit[] = [];
   const user = userMessage(input.text, input.linkHosts);
   let classification: Classification | null = null;
+  let dropped: Extraction["dropped"] = [];
 
   try {
     const c = await step(
@@ -122,7 +123,6 @@ export async function runPipeline(
       return { outcome: "classified", classification, calls, raw: { classification: c.raw } };
     }
 
-    let dropped: Extraction["dropped"] = [];
     const e = await step(
       client,
       "extract",
@@ -148,10 +148,13 @@ export async function runPipeline(
     if (err instanceof ModelError) {
       if (err.kind === "auth") return { outcome: "aborted", error: err, calls };
       if (err.kind === "transient") return { outcome: "deferred", error: err, calls };
-      return { outcome: "manual", classification, calls, reason: err.message, dropped: [] };
+      // A rejected request that is about the setup (unknown model, bad parameter) would fail for every
+      // message: stop the run instead of marking each one for manual entry.
+      if (err.status === 400 || err.status === 404 || err.status === 422) return { outcome: "aborted", error: err, calls };
+      return { outcome: "manual", classification, calls, reason: err.message, dropped };
     }
     if (err instanceof ValidationError) {
-      return { outcome: "manual", classification, calls, reason: `the model's answer was not usable: ${err.message}`, dropped: [] };
+      return { outcome: "manual", classification, calls, reason: `the model's answer was not usable: ${err.message}`, dropped };
     }
     throw err;
   }
@@ -231,7 +234,7 @@ export async function extractPending(
           counts.manual++;
         }
       }
-      continue;
+      break; // the model is unreachable: do not spend the other messages' tries on the same outage
     }
 
     const wrote = await record(m, text, truncated, client, out.outcome === "classified"
@@ -260,9 +263,10 @@ async function record(m: Pending, shown: string, truncated: boolean, client: Mod
   return tx(async (q) => {
     // The model took a while; check that the message is still verified and its clean text is the text it read.
     const [cur] = await q.query<{ ok: boolean }>(
-      `SELECT (status = 'Matched' AND purged_at IS NULL AND text_clean = $2) AS ok
+      `SELECT (status = 'Matched' AND purged_at IS NULL AND text_clean = $2
+                AND project_id IS NOT DISTINCT FROM $3 AND vendor_id IS NOT DISTINCT FROM $4) AS ok
        FROM inbound_messages WHERE id = $1 FOR UPDATE`,
-      [m.id, m.text_clean],
+      [m.id, m.text_clean, m.project_id, m.vendor_id],
     );
     if (!cur?.ok) return false;
     const [dup] = await q.query("SELECT 1 FROM extractions WHERE message_id = $1", [m.id]);

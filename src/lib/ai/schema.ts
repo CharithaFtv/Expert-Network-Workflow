@@ -186,6 +186,11 @@ function drop(c: Ctx, field: string, reason: string) {
   c.drops.push({ candidate: c.index, field, reason });
 }
 
+const wordsOf = (s: string) => forQuote(s).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 2);
+
+/** Fields whose value must be stated in its own quote, not merely sit near it. */
+const STATED_IN_QUOTE = new Set(["current_title", "current_employer", "geography"]);
+
 /** A `{value, confidence, quote}` field. Returns it only if its quote is in the email. */
 function checkText(raw: unknown, field: string, c: Ctx): Field<string> | undefined {
   if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
@@ -196,8 +201,25 @@ function checkText(raw: unknown, field: string, c: Ctx): Field<string> | undefin
   if (!value || value.length > MAX_VALUE) return void drop(c, field, "empty or too long");
   if (!Number.isFinite(raw.confidence)) return void drop(c, field, "bad confidence");
   if (!quoteInSource(raw.quote, c.source)) return void drop(c, field, "quote not found in the email");
+  if (STATED_IN_QUOTE.has(field)) {
+    const inQuote = new Set(wordsOf(raw.quote));
+    if (!wordsOf(value).every((w) => inQuote.has(w))) return void drop(c, field, "the value is not stated in its quote");
+  }
   return { value, confidence: clamp01(raw.confidence), quote: raw.quote.trim() };
 }
+
+const CURRENCY_MARKS: [RegExp, string][] = [
+  [/\$|\busd\b|\bdollars?\b/, "USD"],
+  [/£|\bgbp\b|\bpounds?\b/, "GBP"],
+  [/€|\beur\b|\beuros?\b/, "EUR"],
+];
+const UNIT_MARKS: [RegExp, string][] = [
+  [/\b(hour|hourly|hr|hrs)\b|\/\s*h\b|\ban hour\b/, "hour"],
+  [/\b(call|session|interview|consultation)\b/, "call"],
+  [/\b(day|daily)\b/, "day"],
+  [/\b(week|weekly)\b/, "week"],
+  [/\b(month|monthly)\b/, "month"],
+];
 
 function checkNumber(raw: unknown, field: string, c: Ctx): Field<number> | undefined {
   if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
@@ -219,7 +241,13 @@ function checkRate(raw: unknown, c: Ctx): Rate | undefined {
   if (!/^[A-Z]{3}$/.test(raw.currency)) return void drop(c, "rate", "currency is not a three-letter code");
   if (!quoteInSource(raw.quote, c.source)) return void drop(c, "rate", "quote not found in the email");
   if (!numberInQuote(raw.amount, raw.quote)) return void drop(c, "rate", "the amount is not in its quote");
-  const unit = typeof raw.unit === "string" && (RATE_UNITS as readonly string[]).includes(raw.unit) ? raw.unit : undefined;
+  // The currency and unit must agree with what the quote says, when it says anything about them.
+  const q = forQuote(raw.quote);
+  const currencies = CURRENCY_MARKS.filter(([re]) => re.test(q)).map(([, code]) => code);
+  if (currencies.length && !currencies.includes(raw.currency)) return void drop(c, "rate", "the currency does not match its quote");
+  let unit = typeof raw.unit === "string" && (RATE_UNITS as readonly string[]).includes(raw.unit) ? raw.unit : undefined;
+  const units = UNIT_MARKS.filter(([re]) => re.test(q)).map(([, u]) => u);
+  if (unit && units.length && !units.includes(unit)) unit = undefined; // keep the amount, lose a unit the quote contradicts
   return { amount: raw.amount, currency: raw.currency, unit, confidence: clamp01(raw.confidence), quote: raw.quote.trim() };
 }
 

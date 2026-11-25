@@ -227,6 +227,11 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
     // Read inside the transaction, under a shared lock on the project, so a project being closed at this
     // very moment cannot leave this message without the retention date its close gives it.
     const until = r.projectId ? await retainUntilForProject(q, r.projectId) : null;
+    const [before] = await q.query<{ project_id: number | null; vendor_id: number | null }>(
+      "SELECT project_id, vendor_id FROM inbound_messages WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+    const moved = !!before && (before.project_id !== r.projectId || before.vendor_id !== r.vendorId);
     const rows = await q.query(
       `UPDATE inbound_messages
        SET status = $2, project_id = $3, vendor_id = $4, match_method = $5, sender_verified = $6,
@@ -255,6 +260,15 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
          WHERE id = $1`,
         [id],
       );
+    } else if (moved) {
+      // Still verified, but on another project or vendor: what the model made of it belonged to the old one.
+      // Drop it (unless a person confirmed a candidate) so extraction runs again for the new project.
+      await q.query(
+        `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
+           (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
+        [id],
+      );
+      await q.query("UPDATE inbound_messages SET extraction_attempts = 0, extraction_error = NULL WHERE id = $1", [id]);
     }
     return true;
   });

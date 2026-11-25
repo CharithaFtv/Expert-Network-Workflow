@@ -298,7 +298,7 @@ export function tidy(text: string): string {
 export function stripInvisible(s: string): string {
   return s
     .normalize("NFKC")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿￹-￻]/g, "");
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f­؜᠎​‎‏‪-‮⁠-⁯﻿￹-￻]/g, "");
 }
 
 const MAX_LINKS = 200;
@@ -324,7 +324,8 @@ function collectLink(href: string, innerText: string, links: Link[]) {
   if (links.length >= MAX_LINKS) return;
   const u = normalizeUrl(decodeEntities(href));
   if (!u) return;
-  links.push({ url: u.toString(), text: tidy(innerText).replace(/\s+/g, " ").slice(0, 300) });
+  // Block boundaries inside the link text are internal markers: make them spaces, as the clean text does.
+  links.push({ url: u.toString(), text: tidy(innerText.replace(/[\u0001\u0002]/g, " ")).replace(/\s+/g, " ").slice(0, 300) });
 }
 
 function dedupeLinks(links: Link[]): Link[] {

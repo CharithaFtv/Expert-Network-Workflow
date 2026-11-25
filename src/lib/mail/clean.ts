@@ -93,13 +93,18 @@ function splitQuoted(text: string, forward: boolean): Split {
 const MOBILE_FOOTER =
   /^(sent from my (iphone|ipad|android|samsung|mobile|blackberry|galaxy)|sent from (outlook|mail|yahoo mail|gmail) (for|on) (ios|android|mac|windows)|get outlook for (ios|android|mac|windows)|sent via .+)/i;
 
+const PROFILE_LIKE = /[$£€]\s*\d|\d\s*(usd|gbp|eur)\b|\b(rate|per hour|an hour|\/\s*h(ou)?r|years? (of )?experience|expert\s*\d|profile\s*\d)\b/i;
+
 /** Cuts a signature only where it is marked: the "-- " delimiter or a mobile app footer near the end. */
 function splitSignature(text: string): { clean: string; signature: string; marker: string | null } {
   const lines = text.split("\n");
   const from = Math.max(1, lines.length - 25); // never the first line, so a message is never emptied
   for (let i = from; i < lines.length; i++) {
     const l = lines[i].trim();
-    if (l === "--") return { clean: tidy(lines.slice(0, i).join("\n")), signature: tidy(lines.slice(i + 1).join("\n")), marker: "delimiter" };
+    // Lines are already trimmed, so a "--" cannot be told from a vendor's separator between profiles. Cut only
+    // where what follows looks like a signature: short, and with no rate or experience in it.
+    const tail = lines.slice(i + 1).join("\n");
+    if (l === "--" && lines.length - i <= 13 && !PROFILE_LIKE.test(tail)) return { clean: tidy(lines.slice(0, i).join("\n")), signature: tidy(lines.slice(i + 1).join("\n")), marker: "delimiter" };
     if (MOBILE_FOOTER.test(l) && lines.length - i <= 5) {
       return { clean: tidy(lines.slice(0, i).join("\n")), signature: tidy(lines.slice(i).join("\n")), marker: "mobile footer" };
     }
