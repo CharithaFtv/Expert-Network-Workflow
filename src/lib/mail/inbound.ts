@@ -1,5 +1,7 @@
 import { db } from "../db.ts";
 import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inbox.ts";
+import { matchPending, type MatchCounts } from "./match.ts";
+import { fetchAttachments, type AttachmentCounts, type AttachmentSource } from "./attachments.ts";
 
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
@@ -10,6 +12,12 @@ export type PollResult = {
   /** Graph IDs Postgres refused to store; each is kept in inbound_failures. */
   failed: string[];
   cursorReset?: boolean;
+  /** What matching did with the messages waiting after this poll (not in a dry run). */
+  matching?: MatchCounts;
+  /** Attachment handling for verified mail (only for a reader that can list attachments). */
+  attachments?: AttachmentCounts;
+  /** Follow-up steps that failed after the messages were stored (the poll itself succeeded). */
+  errors: string[];
 };
 
 /** Postgres text and JSONB cannot hold a NUL character; email can, so remove it before inserting. */
@@ -112,7 +120,7 @@ export async function pollInbox(
   let cursor = state?.delta_link ?? null;
   let since = cursor && state?.since ? new Date(state.since) : lookback();
 
-  const result: PollResult = { fetched: 0, stored: 0, duplicates: 0, failed: [] };
+  const result: PollResult = { fetched: 0, stored: 0, duplicates: 0, failed: [], errors: [] };
   const onPage = async (messages: InboundMessage[], checkpoint: string | null) => {
     for (const m of messages) {
       result.fetched++;
@@ -141,6 +149,24 @@ export async function pollInbox(
     next = await reader.readChanges(null, since, onPage);
   }
 
-  if (!opts.dryRun) await saveCursor(reader.name, next, since);
+  if (!opts.dryRun) {
+    await saveCursor(reader.name, next, since);
+    // After the cursor is safe, two follow-up steps. Each failure is recorded in `errors` instead of being
+    // thrown, so the result still says what was stored and one failing step does not stop the other.
+    // Unmatched messages stay in `Received` and the next poll (or `npm run match-inbox`) tries again.
+    try {
+      result.matching = await matchPending();
+    } catch (e) {
+      result.errors.push(`matching: ${(e as Error).message}`);
+    }
+    // Attachments of verified mail only; a failed message is retried on a later poll.
+    if ("listAttachments" in reader) {
+      try {
+        result.attachments = await fetchAttachments(reader as unknown as AttachmentSource);
+      } catch (e) {
+        result.errors.push(`attachments: ${(e as Error).message}`);
+      }
+    }
+  }
   return result;
 }

@@ -27,6 +27,18 @@ try {
     console.error(`${result.failed.length} message(s) could not be stored. They are kept in the inbound_failures table: ${result.failed.join(", ")}`);
     exitCode = 1;
   }
+  for (const err of result.errors) {
+    console.error(`messages were stored, but a follow-up step failed (${err}). The next poll retries it.`);
+    exitCode = 1;
+  }
+  if (result.attachments?.failed) {
+    console.error(`attachments could not be fetched for ${result.attachments.failed} message(s); the next poll retries them: ${result.attachments.errors.join("; ")}`);
+    exitCode = 1;
+  }
+  if (result.attachments?.abandoned) {
+    console.error(`${result.attachments.abandoned} message(s) had attachments that kept failing and were given up on; they need a person.`);
+    exitCode = 1;
+  }
 } catch (e) {
   console.error(`poll-inbox: ${(e as Error).message}`);
   exitCode = 1;

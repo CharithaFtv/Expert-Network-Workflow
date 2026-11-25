@@ -30,7 +30,7 @@ describe("createProject", () => {
     const id = await created();
     const view = (await getProjectFor(id, ALICE))!;
     expect(view.project.code).toMatch(/^EN-\d{4}-0001$/);
-    expect(view.project.status).toBe("Submitted");
+    expect(view.project.status).toBe("Just opened");
     expect(view.members.map((m) => [m.user_id, m.role]).sort()).toEqual([
       [ALICE, "Requester"],
       [BOB, "Team"],

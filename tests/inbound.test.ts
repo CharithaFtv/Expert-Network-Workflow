@@ -39,7 +39,7 @@ beforeEach(resetDb);
 describe("pollInbox", () => {
   it("stores messages and saves the cursor", async () => {
     const r = await pollInbox(fakeReader([[msg(1), msg(2)], [msg(3)]]));
-    expect(r).toEqual({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
+    expect(r).toMatchObject({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-1");
   });
@@ -133,6 +133,36 @@ describe("pollInbox", () => {
     expect(q.payload.subject).toContain("ask 2");
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-ok");
+  });
+
+  it("reports a failing follow-up step, keeps what was stored, and still runs the other step", async () => {
+    const real = db.query.bind(db);
+    const spy = vi.spyOn(db, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("WHERE status = 'Received'")) throw new Error("db hiccup"); // the matching step
+      return real(text, params);
+    });
+    const reader = {
+      ...fakeReader([[msg(1)]], "delta-ok"),
+      async listAttachments() {
+        return [];
+      },
+      async downloadAttachment() {
+        return Buffer.alloc(0);
+      },
+    };
+    try {
+      const r = await pollInbox(reader);
+      expect(r).toMatchObject({ fetched: 1, stored: 1, failed: [] });
+      expect(r.errors).toEqual(["matching: db hiccup"]);
+      expect(r.matching).toBeUndefined();
+      expect(r.attachments).toMatchObject({ messages: 0, failed: 0 }); // the attachment step still ran
+    } finally {
+      spy.mockRestore();
+    }
+    const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
+    expect(s.delta_link).toBe("delta-ok"); // the cursor was saved before the follow-up steps
+    const [m] = await db.query<{ status: string }>("SELECT status FROM inbound_messages");
+    expect(m.status).toBe("Received"); // left for the next poll
   });
 
   it("stops without moving the cursor when a refused message cannot be quarantined either", async () => {

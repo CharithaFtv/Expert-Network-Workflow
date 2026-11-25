@@ -38,7 +38,7 @@ export function validBrief(over: Record<string, unknown> = {}) {
 export async function resetDb() {
   // Keeps vendors (seeded by migration); restarts ids so project codes are predictable.
   await db.query(
-    "TRUNCATE inbound_failures, inbound_messages, mailbox_sync, notifications, outbox, project_vendors, project_members, projects RESTART IDENTITY CASCADE",
+    "TRUNCATE project_status_log, inbound_attachments, inbound_failures, inbound_messages, mailbox_sync, notifications, outbox, project_vendors, project_members, projects RESTART IDENTITY CASCADE",
   );
-  await db.query("UPDATE vendors SET intake_email = 'intake' || id || '@vendor.test'");
+  await db.query("UPDATE vendors SET intake_email = 'intake' || id || '@vendor.test', domains = '{}', active = 1");
 }
