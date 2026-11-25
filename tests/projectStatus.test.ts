@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { db } from "@/lib/db";
+import { db, tx } from "@/lib/db";
 import { purgeExpired } from "@/lib/mail/attachments";
 import { matchPending } from "@/lib/mail/match";
 import { createProject } from "@/lib/projects";
@@ -163,6 +163,39 @@ describe("closing and retention", () => {
     );
     expect(m.status).toBe("Matched");
     expect(m.retain_until).toBe((await row(p.id)).closed_at);
+  });
+
+  it("waits for a close that is in progress, so a message saved at that moment still gets its retention date", async () => {
+    vi.stubEnv("SENDER_AUTH", "off");
+    vi.stubEnv("RETENTION_DAYS_AFTER_CLOSE", "0");
+    const p = await project();
+    await db.query(
+      `INSERT INTO inbound_messages (graph_id, received_at, from_address, subject, status, created_at)
+       VALUES ('racing', $1, 'intake1@vendor.test', $2, 'Received', $1)`,
+      [new Date().toISOString(), `Re: [${p.code}] racing the close`],
+    );
+    let finished = false;
+    let matching: Promise<unknown> = Promise.resolve();
+    await tx(async (q) => {
+      await q.query("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", [p.id]); // a close has started
+      matching = matchPending().then(() => {
+        finished = true;
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(finished).toBe(false); // the save is waiting on the project, not racing ahead of the close
+      const now = new Date().toISOString();
+      await q.query("UPDATE projects SET status = 'Closed', closed_at = $2 WHERE id = $1", [p.id, now]);
+      await q.query(
+        "UPDATE inbound_messages SET retain_until = $2 WHERE project_id = $1 AND retain_until IS NULL",
+        [p.id, now],
+      );
+    });
+    await matching;
+    const [m] = await db.query<{ status: string; retain_until: string | null }>(
+      "SELECT status, retain_until FROM inbound_messages WHERE graph_id = 'racing'",
+    );
+    expect(m.status).toBe("Matched");
+    expect(m.retain_until).toBe((await row(p.id)).closed_at); // dated, not left outside retention
   });
 
   it("purges a closed project's mail, and nothing else, only when asked", async () => {

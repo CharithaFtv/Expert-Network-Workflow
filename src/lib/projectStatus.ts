@@ -1,4 +1,4 @@
-import { db, tx } from "./db.ts";
+import { tx, type Queryable } from "./db.ts";
 
 /**
  * Project states and who may move a project between them.
@@ -96,9 +96,21 @@ export async function changeProjectStatus(
   });
 }
 
-/** A message that arrives for a project that is already closed expires on the same terms. */
-export async function retainUntilForProject(projectId: number): Promise<string | null> {
-  const [p] = await db.query<{ closed_at: string | null }>("SELECT closed_at FROM projects WHERE id = $1", [projectId]);
+/**
+ * The retention date for a message that is being put on a project: the project's close date plus the
+ * period, or null if the project is open or no period is set. A message that arrives for a project that
+ * is already closed expires on the same terms as the rest of its mail.
+ *
+ * Call it inside the transaction that writes the message. It takes a shared lock on the project row, and
+ * closing a project takes the exclusive lock, so the two cannot interleave: either the close finished
+ * first and this sees it, or this finished first and the close then dates the message it just saved.
+ * Reading the close date before the transaction could miss a close that commits in between.
+ */
+export async function retainUntilForProject(q: Queryable, projectId: number): Promise<string | null> {
+  const [p] = await q.query<{ closed_at: string | null }>(
+    "SELECT closed_at FROM projects WHERE id = $1 FOR SHARE",
+    [projectId],
+  );
   const days = retentionDaysAfterClose();
   return p?.closed_at && days !== null ? retainUntilAfterClose(p.closed_at, days) : null;
 }

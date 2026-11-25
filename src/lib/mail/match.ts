@@ -202,8 +202,10 @@ export async function decide(
  * assignment is an explicit override and always writes. Returns whether anything was written.
  */
 async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise<boolean> {
-  const until = r.projectId ? await retainUntilForProject(r.projectId) : null;
   return tx(async (q) => {
+    // Read inside the transaction, under a shared lock on the project, so a project being closed at this
+    // very moment cannot leave this message without the retention date its close gives it.
+    const until = r.projectId ? await retainUntilForProject(q, r.projectId) : null;
     const rows = await q.query(
       `UPDATE inbound_messages
        SET status = $2, project_id = $3, vendor_id = $4, match_method = $5, sender_verified = $6,
