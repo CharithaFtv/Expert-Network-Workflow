@@ -37,7 +37,8 @@ type Row = {
   headers: { name: string; value: string }[] | null;
 };
 
-const CODE = /\[(EN-[A-Z0-9]+-\d{4})\]/i;
+// Four digits is the minimum: the number is padded to four, but past 9999 it simply gets longer.
+const CODE = /\[(EN-[A-Z0-9]+-\d{4,})\]/i;
 
 export const domainOf = (address: string | null | undefined) => {
   const at = address?.lastIndexOf("@") ?? -1;
@@ -63,7 +64,9 @@ async function findProject(m: Row): Promise<{ projectId: number; method: MatchMe
   const code = m.subject.match(CODE)?.[1];
   if (code) {
     const [p] = await db.query<{ id: number }>("SELECT id FROM projects WHERE upper(code) = upper($1)", [code]);
-    if (p) return { projectId: p.id, method: "subject_code" };
+    // A code that names no project is not guessed around: the message stays Unmatched for a person, even
+    // if its thread or reply headers point somewhere.
+    return p ? { projectId: p.id, method: "subject_code" } : null;
   }
   if (m.conversation_id) {
     const [p] = await db.query<{ project_id: number }>(
@@ -97,8 +100,11 @@ export const FREE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
 /**
  * Did the receiving mail system authenticate the sender? Read from the headers Exchange adds.
  *   - mail from inside our own tenant (AuthAs: Internal) counts
- *   - otherwise DMARC must have passed, or both SPF and DKIM
+ *   - otherwise DMARC must have passed. SPF or DKIM passing alone is not enough: they can pass for a
+ *     domain that is not the one shown in From, and only DMARC checks that the two line up
  *   - anything else (fail, none, no header) does not
+ * Only the topmost Authentication-Results header is read: the receiving server adds its own on top, while
+ * a header the sender included sits below it and could claim anything.
  * SENDER_AUTH=off skips the check (local development without real vendor mail). Default: on.
  */
 export function senderAuthenticated(
@@ -109,9 +115,8 @@ export function senderAuthenticated(
   const values = (name: string) =>
     (headers ?? []).filter((h) => h.name.toLowerCase() === name).map((h) => h.value.toLowerCase());
   if (values("x-ms-exchange-organization-authas").some((v) => v.trim() === "internal")) return true;
-  const results = values("authentication-results").join(" ");
-  if (/\bdmarc=pass\b/.test(results)) return true;
-  return /\bspf=pass\b/.test(results) && /\bdkim=pass\b/.test(results);
+  const results = values("authentication-results")[0] ?? "";
+  return /\bdmarc=pass\b/.test(results);
 }
 
 type SenderCheck = { verified: boolean; vendorId: number | null; note: string | null };

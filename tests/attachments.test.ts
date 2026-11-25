@@ -192,6 +192,46 @@ describe("fetchAttachments", () => {
     expect(await fetchAttachments(src)).toMatchObject({ stored: 2, skipped: 2 });
   });
 
+  it("enforces the total size on the bytes received, not on the sizes Graph listed", async () => {
+    const m = await message();
+    const chunk = Buffer.alloc(MAX_ATTACHMENT_BYTES); // exactly the per-file limit
+    // Graph lists each as 1 byte, but each download is 10 MiB: 30 MiB would exceed the 25 MiB cap.
+    const atts = [1, 2, 3].map((i) => ({ info: info({ id: `a${i}`, name: `f${i}.pdf`, size: 1 }), bytes: chunk }));
+    expect(await fetchAttachments(source({ [m.graphId]: atts }))).toMatchObject({ stored: 2, skipped: 1 });
+    const rows = await db.query<{ status: string; skip_reason: string | null }>(
+      "SELECT status, skip_reason FROM inbound_attachments ORDER BY id",
+    );
+    expect(rows.map((r) => [r.status, r.skip_reason])).toEqual([
+      ["Stored", null],
+      ["Stored", null],
+      ["Skipped", "message size limit reached"],
+    ]);
+    const [t] = await db.query<{ total: string }>("SELECT COALESCE(SUM(octet_length(content)), 0) AS total FROM inbound_attachments");
+    expect(Number(t.total)).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+  });
+
+  it("writes nothing when the message changes during the download", async () => {
+    const changes: [string, string][] = [
+      ["purged meanwhile", "UPDATE inbound_messages SET purged_at = now()::text WHERE id = $1"],
+      ["no longer Matched", "UPDATE inbound_messages SET status = 'Unverified' WHERE id = $1"],
+      ["already fetched by another run", "UPDATE inbound_messages SET attachments_fetched_at = now()::text WHERE id = $1"],
+    ];
+    for (const [label, sql] of changes) {
+      await resetDb();
+      const m = await message();
+      const src = source({ [m.graphId]: [{ info: info(), bytes: Buffer.from("x") }] });
+      const realDownload = src.downloadAttachment;
+      src.downloadAttachment = async (graphId, id) => {
+        const bytes = await realDownload(graphId, id);
+        await db.query(sql, [m.id]); // the change lands after the download, before the write
+        return bytes;
+      };
+      const counts = await fetchAttachments(src);
+      expect(counts, label).toMatchObject({ messages: 0, stored: 0, skipped: 0 });
+      expect((await db.query("SELECT 1 FROM inbound_attachments")).length, label).toBe(0);
+    }
+  });
+
   it("removes NUL characters from a file name", async () => {
     const m = await message();
     const src = source({ [m.graphId]: [{ info: info({ name: "a\u0000b.pdf" }), bytes: Buffer.from("x") }] });
@@ -255,5 +295,32 @@ describe("GraphInbox attachments", () => {
     expect((await g.downloadAttachment("msg/1", "f")).toString()).toBe("hello");
     expect(urls[0]).toContain("/messages/msg%2F1/attachments");
     expect(urls[1]).toContain("/attachments/f/$value");
+  });
+
+  const att = (id: string) => ({ id, name: `${id}.pdf`, size: 1, "@odata.type": "#microsoft.graph.fileAttachment" });
+
+  it("follows the paging links so no attachment is missed", async () => {
+    const calls: { url: string; prefer: string | null }[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
+      calls.push({ url, prefer: new Headers(init?.headers).get("Prefer") });
+      if (url.includes("page2")) return json({ value: [att("c")] });
+      if (url.includes("page1")) {
+        return json({ value: [att("b")], "@odata.nextLink": "https://graph.microsoft.com/v1.0/users/x/messages/m/attachments?page2" });
+      }
+      return json({ value: [att("a")], "@odata.nextLink": "https://graph.microsoft.com/v1.0/users/x/messages/m/attachments?page1" });
+    }) as unknown as typeof fetch;
+    const list = await new GraphInbox(cfg, fetchFn).listAttachments("m");
+    expect(list.map((a) => a.id)).toEqual(["a", "b", "c"]);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((c) => c.prefer?.includes('IdType="ImmutableId"'))).toBe(true);
+  });
+
+  it("fails, rather than record half a list, when the paging never ends", async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
+      return json({ value: [att("a")], "@odata.nextLink": "https://graph.microsoft.com/v1.0/users/x/messages/m/attachments?again" });
+    }) as unknown as typeof fetch;
+    await expect(new GraphInbox(cfg, fetchFn).listAttachments("m")).rejects.toThrow(/exceeded 20 pages/);
   });
 });

@@ -99,12 +99,22 @@ export async function fetchAttachments(source: AttachmentSource, limit = 50): Pr
           if (bytes.length > MAX_ATTACHMENT_BYTES) {
             reason = "over the size limit";
             bytes = null;
+          } else if (storedBytes + bytes.length > MAX_MESSAGE_BYTES) {
+            reason = "message size limit reached";
+            bytes = null;
           } else storedBytes += bytes.length;
         }
         prepared.push({ info, reason, bytes });
       }
       const now = new Date().toISOString();
-      await tx(async (q) => {
+      const written = await tx(async (q) => {
+        // The download happened outside this transaction, so check the message again under a lock: a purge,
+        // a re-assignment or another run may have changed it meanwhile. If so, write nothing.
+        const [cur] = await q.query<{ status: string; purged_at: string | null; done: string | null }>(
+          "SELECT status, purged_at, attachments_fetched_at AS done FROM inbound_messages WHERE id = $1 FOR UPDATE",
+          [m.id],
+        );
+        if (!cur || cur.status !== "Matched" || cur.purged_at || cur.done) return false;
         for (const { info, reason, bytes } of prepared) {
           await q.query(
             `INSERT INTO inbound_attachments
@@ -126,7 +136,9 @@ export async function fetchAttachments(source: AttachmentSource, limit = 50): Pr
           );
         }
         await q.query("UPDATE inbound_messages SET attachments_fetched_at = $2 WHERE id = $1", [m.id, now]);
+        return true;
       });
+      if (!written) continue; // changed under us: nothing written, nothing counted
       counts.messages++;
       for (const p of prepared) p.bytes ? counts.stored++ : counts.skipped++;
     } catch (e) {

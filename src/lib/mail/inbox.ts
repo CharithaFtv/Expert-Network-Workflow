@@ -89,6 +89,7 @@ export function toInboundMessage(m: GraphMessage): InboundMessage {
 // A runaway nextLink loop must not run forever. Hitting the cap is not a stall: the caller has saved a
 // checkpoint after every page, so the next run carries on from where this one stopped.
 const MAX_PAGES = 200;
+const MAX_ATTACHMENT_PAGES = 20;
 
 /** Reads the Inbox through a Graph delta query using immutable message IDs. Needs Application Mail.Read. */
 export class GraphInbox extends GraphClient implements InboxReader, AttachmentSource {
@@ -135,34 +136,48 @@ export class GraphInbox extends GraphClient implements InboxReader, AttachmentSo
 
   /** Name, type and size of each attachment of a message. Nothing is downloaded. */
   async listAttachments(graphId: string): Promise<AttachmentInfo[]> {
-    const res = await this.api(
-      `/messages/${encodeURIComponent(graphId)}/attachments?$select=id,name,contentType,size,isInline`,
-      { headers: { Prefer: 'IdType="ImmutableId"' } },
-    );
-    if (!res.ok) throw new MailError(`Graph attachment list failed: ${res.status} ${await safeText(res)}`, "run");
-    const json = (await res.json()) as {
-      value: {
-        id: string;
-        name?: string;
-        contentType?: string;
-        size?: number;
-        isInline?: boolean;
-        "@odata.type"?: string;
-      }[];
-    };
-    return json.value.map((a) => ({
-      id: a.id,
-      name: a.name ?? "unnamed",
-      contentType: a.contentType ?? null,
-      size: a.size ?? 0,
-      isInline: !!a.isInline,
-      kind:
-        a["@odata.type"] === "#microsoft.graph.fileAttachment"
-          ? "file"
-          : a["@odata.type"] === "#microsoft.graph.referenceAttachment"
-            ? "reference"
-            : "item",
-    }));
+    const headers = { Prefer: 'IdType="ImmutableId"' };
+    let url: string | undefined =
+      `/messages/${encodeURIComponent(graphId)}/attachments?$select=id,name,contentType,size,isInline`;
+    const out: AttachmentInfo[] = [];
+    // Follow the paging links: stopping after the first page would leave later attachments unrecorded
+    // while the message is marked done. A runaway list is an error, so the message is retried and then
+    // reported instead of being half-recorded.
+    for (let page = 0; url; page++) {
+      if (page >= MAX_ATTACHMENT_PAGES) {
+        throw new MailError(`Graph attachment list exceeded ${MAX_ATTACHMENT_PAGES} pages`, "run");
+      }
+      const res = await this.api(url, { headers });
+      if (!res.ok) throw new MailError(`Graph attachment list failed: ${res.status} ${await safeText(res)}`, "run");
+      const json = (await res.json()) as {
+        value: {
+          id: string;
+          name?: string;
+          contentType?: string;
+          size?: number;
+          isInline?: boolean;
+          "@odata.type"?: string;
+        }[];
+        "@odata.nextLink"?: string;
+      };
+      for (const a of json.value) {
+        out.push({
+          id: a.id,
+          name: a.name ?? "unnamed",
+          contentType: a.contentType ?? null,
+          size: a.size ?? 0,
+          isInline: !!a.isInline,
+          kind:
+            a["@odata.type"] === "#microsoft.graph.fileAttachment"
+              ? "file"
+              : a["@odata.type"] === "#microsoft.graph.referenceAttachment"
+                ? "reference"
+                : "item",
+        });
+      }
+      url = json["@odata.nextLink"];
+    }
+    return out;
   }
 
   /** The raw bytes of one file attachment. The caller has already decided it is small enough. */

@@ -185,6 +185,28 @@ describe("matching a thread", () => {
     expect(await outcome(viaHeader)).toMatchObject({ status: "Matched", project_id: p.id, match_method: "header" });
   });
 
+  it("does not fall back to the thread or reply headers when the subject names a project that does not exist", async () => {
+    const p = await project();
+    await inbound({ subject: `[${p.code}] x`, messageId: "<orig@vendor.test>", conversation: "c5" });
+    const viaConversation = await inbound({ subject: "Re: [EN-2026-9999] typo", conversation: "c5" });
+    const viaHeader = await inbound({
+      subject: "Re: [EN-2026-9999] typo",
+      conversation: "other",
+      headers: [hdr("In-Reply-To", "<orig@vendor.test>")],
+    });
+    await matchPending();
+    expect(await outcome(viaConversation)).toMatchObject({ status: "Unmatched", project_id: null });
+    expect(await outcome(viaHeader)).toMatchObject({ status: "Unmatched", project_id: null });
+  });
+
+  it("matches a code whose number has grown past four digits", async () => {
+    const p = await project();
+    await db.query("UPDATE projects SET code = 'EN-2026-10000' WHERE id = $1", [p.id]);
+    const id = await inbound({ subject: "Re: [EN-2026-10000] still ours" });
+    await matchPending();
+    expect(await outcome(id)).toMatchObject({ status: "Matched", project_id: p.id, match_method: "subject_code" });
+  });
+
   it("leaves a message with no code, thread or reply headers for a person", async () => {
     await project();
     const id = await inbound({ subject: "random hello", conversation: "c4" });
@@ -257,16 +279,35 @@ describe("poll integration", () => {
 const hdr = (name: string, value: string) => ({ name, value });
 
 describe("sender authentication", () => {
-  it("accepts internal mail, a DMARC pass, or SPF and DKIM passes, and nothing else", () => {
+  it("accepts internal mail or a DMARC pass, and nothing else", () => {
     const check = (headers: { name: string; value: string }[] | null) => senderAuthenticated(headers, {});
     expect(check([hdr("X-MS-Exchange-Organization-AuthAs", "Internal")])).toBe(true);
     expect(check([hdr("Authentication-Results", "mx.microsoft.com 1; spf=none; dkim=none; dmarc=pass action=none")])).toBe(true);
-    expect(check([hdr("authentication-results", "mx; SPF=Pass; DKIM=Pass; dmarc=bestguesspass")])).toBe(true);
+    expect(check([hdr("authentication-results", "mx; DMARC=Pass action=none")])).toBe(true);
     expect(check([hdr("Authentication-Results", "mx; spf=pass; dkim=none; dmarc=none")])).toBe(false);
     expect(check([hdr("Authentication-Results", "mx; dkim=fail; spf=fail; dmarc=fail")])).toBe(false);
+    expect(check([hdr("Authentication-Results", "mx; dmarc=bestguesspass")])).toBe(false);
     expect(check([hdr("X-MS-Exchange-Organization-AuthAs", "Anonymous")])).toBe(false);
     expect(check([])).toBe(false);
     expect(check(null)).toBe(false);
+  });
+
+  it("does not accept SPF and DKIM passes for a domain that is not the From domain", () => {
+    // The attacker owns evil.test: SPF and DKIM pass for it, but DMARC fails because it is not the From domain.
+    const spoof = [
+      hdr(
+        "Authentication-Results",
+        "mx.microsoft.com 1; spf=pass smtp.mailfrom=evil.test; dkim=pass header.d=evil.test; dmarc=fail action=none header.from=vendor.test",
+      ),
+    ];
+    expect(senderAuthenticated(spoof, {})).toBe(false);
+  });
+
+  it("reads only the topmost Authentication-Results header, so one the sender included cannot vouch for itself", () => {
+    const real = hdr("Authentication-Results", "mx.microsoft.com 1; dmarc=fail action=none header.from=vendor.test");
+    const forged = hdr("Authentication-Results", "mx.microsoft.com 1; dmarc=pass action=none header.from=vendor.test");
+    expect(senderAuthenticated([real, forged], {})).toBe(false); // the receiving server's header is on top
+    expect(senderAuthenticated([forged, real], {})).toBe(true); // top header passes: that is what counts
   });
 
   it("can be switched off for local development", () => {
