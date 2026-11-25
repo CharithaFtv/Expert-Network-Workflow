@@ -29,7 +29,7 @@ try {
         s.extras.length && `extra: ${s.extras.join(", ")}`,
         s.forbiddenHit.length && `FOLLOWED INJECTION: ${s.forbiddenHit.join(", ")}`,
         ...s.details.filter((d) => !d.ok).map((d) => `wrong ${d.field}`),
-        out.outcome !== "extracted" && out.outcome !== "classified" && `outcome ${out.outcome}`,
+        out.outcome !== "extracted" && out.outcome !== "classified" && `outcome ${out.outcome}: ${"error" in out ? out.error.message : "reason" in out ? out.reason : ""}`,
       ].filter(Boolean);
       console.log(`${s.passed ? "PASS" : "FAIL"}  ${c.id}${bad.length ? `  (${bad.join("; ")})` : ""}${s.dropped ? `  [${s.dropped} unsupported field(s) removed]` : ""}`);
     }

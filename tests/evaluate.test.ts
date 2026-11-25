@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { meetsBar, scoreCase, summarise, type EvalCase } from "@/lib/ai/evaluate";
 import { runPipeline } from "@/lib/ai/extract";
 import type { ModelClient, ModelRequest } from "@/lib/ai/model";
-import { CLASSIFY_SYSTEM } from "@/lib/ai/prompts";
+import { CLASSIFY_SYSTEM, EXTRACT_SYSTEM } from "@/lib/ai/prompts";
 import type { Candidate } from "@/lib/ai/schema";
 
 const cases = JSON.parse(fs.readFileSync(new URL("./fixtures/extraction-cases.json", import.meta.url), "utf8")) as EvalCase[];
@@ -20,6 +20,7 @@ function oracle(c: EvalCase): ModelClient {
             candidates: (c.expect.candidates ?? []).map((e) => {
               const cand: Record<string, unknown> = { name: f(e.name) };
               if (e.employer) cand.current_employer = f(e.employer);
+              if (e.pastEmployer) cand.past_roles = [{ employer: e.pastEmployer, confidence: 0.9, quote: e.pastEmployer }];
               if (e.title) cand.current_title = f(e.title);
               if (e.years !== undefined) cand.years_experience = { value: e.years, confidence: 0.9, quote: String(e.years) + " years" };
               if (e.rate) {
@@ -55,6 +56,14 @@ describe("the evaluation set", () => {
     for (const k of ["expert_candidates", "update", "vendor_question", "acknowledgement", "scheduling", "other"]) expect(kinds.has(k as never), k).toBe(true);
     expect(cases.some((c) => c.expect.forbidden?.length)).toBe(true); // injection cases are there
     for (const c of cases) for (const e of c.expect.candidates ?? []) expect(c.text, `${c.id}: ${e.name}`).toContain(e.name);
+  });
+
+  it("treats a former role as past, not current, and the prompt says so", () => {
+    expect(EXTRACT_SYSTEM).toMatch(/former[^.]*past role[^.]*never in the current fields/i);
+    const c = cases.find((x) => x.id === "two-named-experts")!;
+    const tom = c.expect.candidates!.find((x) => x.name === "Tom Okafor")!;
+    expect(tom.employer).toBeNull();
+    expect(tom.pastEmployer).toBe("Contoso Retail");
   });
 
   it("scores a perfect model as passing everything, and clears the bar", async () => {

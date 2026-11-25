@@ -7,7 +7,7 @@
       "categories": ["expert_candidates"],
       "candidates": [
         { "name": "Maria Lindqvist", "employer": "Northwind Foods", "title": "Vice President of Procurement", "years": 14, "rate": { "amount": 600, "currency": "USD" } },
-        { "name": "Tom Okafor", "employer": "Contoso Retail", "rate": { "amount": 450, "currency": "USD" } }
+        { "name": "Tom Okafor", "employer": null, "pastEmployer": "Contoso Retail", "rate": { "amount": 450, "currency": "USD" } }
       ]
     }
   },

@@ -59,7 +59,7 @@ try {
     if (!client) {
       console.log("extraction is off (EXTRACTION_MODE is not \"on\"): nothing was sent. Use --preview to see what would be.");
     } else {
-      console.log(`sending the cleaned text of waiting verified replies to the Claude API (${client.model})`);
+      console.log(`sending the cleaned text of waiting verified replies to the model API (${client.model})`);
       const r = await extractPending(client);
       console.log(r);
       if (r.aborted) exitCode = 1;

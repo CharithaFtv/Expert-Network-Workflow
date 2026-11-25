@@ -188,7 +188,7 @@ function drop(c: Ctx, field: string, reason: string) {
 
 /** A `{value, confidence, quote}` field. Returns it only if its quote is in the email. */
 function checkText(raw: unknown, field: string, c: Ctx): Field<string> | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
   if (!isObj(raw) || typeof raw.value !== "string" || typeof raw.confidence !== "number" || typeof raw.quote !== "string") {
     return void drop(c, field, "malformed");
   }
@@ -200,7 +200,7 @@ function checkText(raw: unknown, field: string, c: Ctx): Field<string> | undefin
 }
 
 function checkNumber(raw: unknown, field: string, c: Ctx): Field<number> | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
   if (!isObj(raw) || typeof raw.value !== "number" || typeof raw.confidence !== "number" || typeof raw.quote !== "string") {
     return void drop(c, field, "malformed");
   }
@@ -211,7 +211,7 @@ function checkNumber(raw: unknown, field: string, c: Ctx): Field<number> | undef
 }
 
 function checkRate(raw: unknown, c: Ctx): Rate | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
   if (!isObj(raw) || typeof raw.amount !== "number" || typeof raw.currency !== "string" || typeof raw.confidence !== "number" || typeof raw.quote !== "string") {
     return void drop(c, "rate", "malformed");
   }
@@ -224,7 +224,7 @@ function checkRate(raw: unknown, c: Ctx): Rate | undefined {
 }
 
 function checkRoles(raw: unknown, c: Ctx): PastRole[] | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw === null) return undefined; // null is how strict-mode providers say "absent"
   if (!Array.isArray(raw)) return void drop(c, "past_roles", "malformed");
   const out: PastRole[] = [];
   raw.slice(0, 10).forEach((r, i) => {

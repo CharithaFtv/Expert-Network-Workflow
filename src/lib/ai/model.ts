@@ -45,6 +45,17 @@ export interface ModelClient {
  */
 export type ModelErrorKind = "transient" | "auth" | "refusal" | "request";
 
+/**
+ * Why a request failed to go out, for an error message: the kind of error and its system code, such as
+ * UNABLE_TO_GET_ISSUER_CERT_LOCALLY or ECONNREFUSED. Never the error's own text, which can echo the request
+ * and so the email or the key.
+ */
+export function networkReason(e: unknown): string {
+  const err = e as { name?: string; cause?: { code?: unknown } };
+  const code = typeof err?.cause?.code === "string" && /^[A-Z0-9_]+$/.test(err.cause.code) ? ` (${err.cause.code})` : "";
+  return `${err?.name ?? "Error"}${code}`;
+}
+
 export class ModelError extends Error {
   readonly kind: ModelErrorKind;
   readonly status: number | null;
@@ -88,7 +99,8 @@ export class AnthropicClient implements ModelClient {
   constructor(opts: AnthropicOptions) {
     if (!opts.apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
     this.model = opts.model;
-    this.o = { baseUrl: "https://api.anthropic.com", timeoutMs: 120_000, ...opts };
+    // An option passed as undefined (an unset setting) must fall back to the default, not erase it.
+    this.o = { ...opts, baseUrl: opts.baseUrl ?? "https://api.anthropic.com", timeoutMs: opts.timeoutMs ?? 120_000 };
   }
 
   async complete(req: ModelRequest): Promise<ModelResponse> {
@@ -119,8 +131,7 @@ export class AnthropicClient implements ModelClient {
         signal: AbortSignal.timeout(this.o.timeoutMs),
       });
     } catch (e) {
-      // Never include the request: it holds the email text.
-      throw new ModelError("transient", `Model request failed: ${(e as Error).name}`);
+      throw new ModelError("transient", `Model request failed: ${networkReason(e)}`);
     }
 
     const requestId = res.headers.get("request-id");

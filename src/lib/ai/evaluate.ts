@@ -13,7 +13,10 @@ import { forQuote, type Candidate, type Category } from "./schema.ts";
  */
 export type ExpectedCandidate = {
   name: string;
-  employer?: string;
+  /** The current employer; null means the email does not give one, so none may be returned. */
+  employer?: string | null;
+  /** An earlier employer that must appear among the past roles. */
+  pastEmployer?: string;
   title?: string;
   years?: number;
   rate?: { amount: number; currency: string };
@@ -62,7 +65,14 @@ export function scoreCase(c: EvalCase, out: PipelineOutcome): CaseScore {
     const g = byName.get(normName(e.name));
     if (!g) continue;
     found++;
-    if (e.employer !== undefined) details.push({ field: `${e.name}: employer`, ok: normEmployer(g.current_employer?.value) === normEmployer(e.employer) });
+    if (e.employer !== undefined) {
+      const ok = e.employer === null ? !g.current_employer : normEmployer(g.current_employer?.value) === normEmployer(e.employer);
+      details.push({ field: `${e.name}: employer`, ok });
+    }
+    if (e.pastEmployer !== undefined) {
+      const want = normEmployer(e.pastEmployer);
+      details.push({ field: `${e.name}: past employer`, ok: !!g.past_roles?.some((r) => normEmployer(r.employer) === want) });
+    }
     if (e.title !== undefined) details.push({ field: `${e.name}: title`, ok: forQuote(g.current_title?.value ?? "") === forQuote(e.title) });
     if (e.years !== undefined) details.push({ field: `${e.name}: years`, ok: g.years_experience?.value === e.years });
     if (e.rate) details.push({ field: `${e.name}: rate`, ok: g.rate?.amount === e.rate.amount && g.rate?.currency === e.rate.currency });

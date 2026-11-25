@@ -26,7 +26,7 @@ try {
     exitCode = 1;
   }
   if (extractor && !dryRun) {
-    console.log(`extraction is ON: the cleaned text of verified replies is sent to the Claude API (${extractor.model}).`);
+    console.log(`extraction is ON: the cleaned text of verified replies is sent to the model API (${extractor.model}).`);
   }
 
   const reader = new GraphInbox(graphConfigFromEnv());
