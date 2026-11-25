@@ -555,6 +555,9 @@ describe("extractPending", () => {
     expect(left.map((r) => [r.name_norm, r.review_status])).toEqual([["jane doe", "Confirmed"]]);
     const s = await state(id);
     expect(s.raw).toBeNull(); // the model's answers contain personal data
+    const [r] = await db.query<{ reason: string | null; error: string | null }>("SELECT reason, error FROM extractions WHERE message_id = $1", [id]);
+    expect(r.reason).toBeNull(); // the model's one-line reason can repeat details from the email
+    expect(r.error).toBeNull();
     expect(s.status).toBe("Extracted"); // the record that it happened stays
   });
 

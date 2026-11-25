@@ -200,7 +200,8 @@ export async function purgeExpired(now = new Date()): Promise<number> {
       // A link can carry a secret in its address, so links go with the message.
       await q.query("DELETE FROM inbound_links WHERE message_id = ANY($1)", [ids]);
       // So does what the model made of it: its raw answers, and every candidate no person has confirmed.
-      await q.query("UPDATE extractions SET raw = NULL WHERE message_id = ANY($1)", [ids]);
+      // The model's one-line reason and any error text can repeat names or details from the email.
+      await q.query("UPDATE extractions SET raw = NULL, reason = NULL, error = NULL WHERE message_id = ANY($1)", [ids]);
       await q.query("DELETE FROM extracted_candidates WHERE message_id = ANY($1) AND review_status <> 'Confirmed'", [ids]);
     }
     return rows.length;

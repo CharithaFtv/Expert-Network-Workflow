@@ -226,7 +226,7 @@ async function dropModelOutput(q: { query: (text: string, params?: unknown[]) =>
     [id],
   );
   await q.query("DELETE FROM extracted_candidates WHERE message_id = $1 AND review_status <> 'Confirmed'", [id]);
-  await q.query("UPDATE extractions SET raw = NULL WHERE message_id = $1", [id]);
+  await q.query("UPDATE extractions SET raw = NULL, reason = NULL, error = NULL WHERE message_id = $1", [id]);
 }
 
 /**
