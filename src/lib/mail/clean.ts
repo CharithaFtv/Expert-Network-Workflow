@@ -220,8 +220,15 @@ export async function cleanPending(limit = 200): Promise<CleanCounts> {
         );
         if (!cur || cur.status !== "Matched" || cur.purged_at) return false;
         if (cur.done && (cur.version ?? 0) >= CLEAN_VERSION) return false; // someone already did it
-        // A re-clean replaces what the older rules produced, links included.
+        // A re-clean replaces what the older rules produced, links included. What the model read was the old
+        // text, so its result goes too and is made again (unless a person has already confirmed one).
         await q.query("DELETE FROM inbound_links WHERE message_id = $1", [m.id]);
+        await q.query(
+          `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
+             (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
+          [m.id],
+        );
+        await q.query("UPDATE inbound_messages SET extraction_attempts = 0, extraction_error = NULL WHERE id = $1", [m.id]);
         await q.query(
           `UPDATE inbound_messages
            SET text_clean = $2, text_removed = $3, clean_info = $4, cleaned_at = $5, clean_version = $6, clean_error = NULL

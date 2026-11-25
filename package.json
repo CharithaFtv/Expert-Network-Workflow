@@ -16,7 +16,9 @@
     "send-outbox": "node --env-file-if-exists=.env.local scripts/send-outbox.ts",
     "poll-inbox": "node --env-file-if-exists=.env.local scripts/poll-inbox.ts",
     "match-inbox": "node --env-file-if-exists=.env.local scripts/match-inbox.ts",
-    "purge-inbox": "node --env-file-if-exists=.env.local scripts/purge-inbox.ts"
+    "purge-inbox": "node --env-file-if-exists=.env.local scripts/purge-inbox.ts",
+    "extract-inbox": "node --env-file-if-exists=.env.local scripts/extract-inbox.ts",
+    "eval-extract": "node --env-file-if-exists=.env.local scripts/eval-extract.ts"
   },
   "dependencies": {
     "next": "16.4.6",

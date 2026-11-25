@@ -241,11 +241,17 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
       // later, the poll produces them again.
       await q.query("DELETE FROM inbound_attachments WHERE message_id = $1", [id]);
       await q.query("DELETE FROM inbound_links WHERE message_id = $1", [id]);
+      // What the model made of it goes too, unless a person has already confirmed a candidate from it.
+      await q.query(
+        `DELETE FROM extractions e WHERE e.message_id = $1 AND NOT EXISTS
+           (SELECT 1 FROM extracted_candidates c WHERE c.extraction_id = e.id AND c.review_status = 'Confirmed')`,
+        [id],
+      );
       await q.query(
         `UPDATE inbound_messages
          SET attachments_fetched_at = NULL, attachments_attempts = 0, attachments_error = NULL,
              text_clean = NULL, text_removed = NULL, clean_info = NULL, cleaned_at = NULL, clean_version = NULL,
-             clean_attempts = 0, clean_error = NULL
+             clean_attempts = 0, clean_error = NULL, extraction_attempts = 0, extraction_error = NULL
          WHERE id = $1`,
         [id],
       );

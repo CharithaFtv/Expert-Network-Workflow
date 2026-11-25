@@ -3,6 +3,8 @@ import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inb
 import { matchPending, type MatchCounts } from "./match.ts";
 import { fetchAttachments, type AttachmentCounts, type AttachmentSource } from "./attachments.ts";
 import { cleanPending, type CleanCounts } from "./clean.ts";
+import { extractPending, type ExtractCounts } from "../ai/extract.ts";
+import type { ModelClient } from "../ai/model.ts";
 
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
@@ -19,6 +21,8 @@ export type PollResult = {
   attachments?: AttachmentCounts;
   /** Clean text and links produced for verified mail. */
   cleaning?: CleanCounts;
+  /** What the model step did (only when extraction is on). */
+  extraction?: ExtractCounts;
   /** Follow-up steps that failed after the messages were stored (the poll itself succeeded). */
   errors: string[];
 };
@@ -112,7 +116,13 @@ async function saveCursor(name: string, link: string, since: Date) {
  */
 export async function pollInbox(
   reader: InboxReader,
-  opts: { since?: Date; dryRun?: boolean; onMessage?: (m: InboundMessage) => void } = {},
+  opts: {
+    since?: Date;
+    dryRun?: boolean;
+    onMessage?: (m: InboundMessage) => void;
+    /** The language model for step 3e. Null or absent: extraction is off and messages simply wait. */
+    extractor?: ModelClient | null;
+  } = {},
 ): Promise<PollResult> {
   const [state] = await db.query<{ delta_link: string | null; since: string | null }>(
     "SELECT delta_link, since FROM mailbox_sync WHERE name = $1",
@@ -175,6 +185,14 @@ export async function pollInbox(
       result.cleaning = await cleanPending();
     } catch (e) {
       result.errors.push(`cleaning: ${(e as Error).message}`);
+    }
+    // The model step, last and optional: a failure here never undoes or blocks anything above it.
+    if (opts.extractor) {
+      try {
+        result.extraction = await extractPending(opts.extractor);
+      } catch (e) {
+        result.errors.push(`extraction: ${(e as Error).message}`);
+      }
     }
   }
   return result;
