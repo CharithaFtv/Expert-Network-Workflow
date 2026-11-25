@@ -135,6 +135,36 @@ describe("pollInbox", () => {
     expect(s.delta_link).toBe("delta-ok");
   });
 
+  it("reports a failing follow-up step, keeps what was stored, and still runs the other step", async () => {
+    const real = db.query.bind(db);
+    const spy = vi.spyOn(db, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("WHERE status = 'Received'")) throw new Error("db hiccup"); // the matching step
+      return real(text, params);
+    });
+    const reader = {
+      ...fakeReader([[msg(1)]], "delta-ok"),
+      async listAttachments() {
+        return [];
+      },
+      async downloadAttachment() {
+        return Buffer.alloc(0);
+      },
+    };
+    try {
+      const r = await pollInbox(reader);
+      expect(r).toMatchObject({ fetched: 1, stored: 1, failed: [] });
+      expect(r.errors).toEqual(["matching: db hiccup"]);
+      expect(r.matching).toBeUndefined();
+      expect(r.attachments).toMatchObject({ messages: 0, failed: 0 }); // the attachment step still ran
+    } finally {
+      spy.mockRestore();
+    }
+    const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
+    expect(s.delta_link).toBe("delta-ok"); // the cursor was saved before the follow-up steps
+    const [m] = await db.query<{ status: string }>("SELECT status FROM inbound_messages");
+    expect(m.status).toBe("Received"); // left for the next poll
+  });
+
   it("stops without moving the cursor when a refused message cannot be quarantined either", async () => {
     await pollInbox(fakeReader([[msg(1)]], "delta-1"));
     const real = db.query.bind(db);

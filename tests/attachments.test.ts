@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import {
   fetchAttachments,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_TRIES,
   MAX_MESSAGE_BYTES,
   purgeExpired,
   skipReason,
@@ -57,6 +58,14 @@ describe("skipReason", () => {
   it("skips programs, scripts and macro-enabled Office files", () => {
     for (const name of ["a.exe", "a.js", "A.DOCM", "b.xlsm", "c.ps1", "d.lnk"]) {
       expect(skipReason(info({ name }), 0)).toBe("blocked file type");
+    }
+  });
+  it("sees through trailing dots and spaces, hidden characters and upper case", () => {
+    for (const name of ["payload.exe.", "invoice.exe ", "invoice.exe. .", "a.EXE", "a.exe‮", "a.e​xe", "x.sh", "x.reg", "x.PIF"]) {
+      expect(skipReason(info({ name }), 0), name).toBe("blocked file type");
+    }
+    for (const name of ["cv.pdf", "notes", "report.exe.pdf", "data.xlsx"]) {
+      expect(skipReason(info({ name }), 0), name).toBeNull();
     }
   });
   it("skips inline images and non-file attachments", () => {
@@ -128,6 +137,40 @@ describe("fetchAttachments", () => {
     expect((await db.query("SELECT 1 FROM inbound_attachments")).length).toBe(0);
     src.failOn = undefined;
     expect(await fetchAttachments(src)).toMatchObject({ messages: 1, stored: 1, failed: 0 });
+  });
+
+  it("counts failed runs, gives up on a message after a few, and does not let it hold up newer ones", async () => {
+    const bad1 = await message();
+    const bad2 = await message();
+    const bad3 = await message();
+    const good = await message();
+    const att = (graphId: string) => ({ [graphId]: [{ info: info({ id: "a1" }), bytes: Buffer.from("x") }] });
+    const src = source({ ...att(bad1.graphId), ...att(bad2.graphId), ...att(bad3.graphId), ...att(good.graphId) });
+    const realList = src.listAttachments;
+    const failing = new Set([bad1.graphId, bad2.graphId, bad3.graphId]);
+    src.listAttachments = async (graphId) => {
+      if (failing.has(graphId)) throw new Error("not found");
+      return realList(graphId);
+    };
+
+    // Two messages a run: the failing ones go first, but a failed message drops behind the untried ones.
+    await fetchAttachments(src, 2);
+    await fetchAttachments(src, 2);
+    const [g] = await db.query<{ attachments_fetched_at: string | null }>(
+      "SELECT attachments_fetched_at FROM inbound_messages WHERE id = $1",
+      [good.id],
+    );
+    expect(g.attachments_fetched_at).not.toBeNull(); // reached on the second run
+
+    let last = await fetchAttachments(src, 2);
+    for (let i = 0; i < 10; i++) last = await fetchAttachments(src, 2);
+    const rows = await db.query<{ attachments_attempts: number; attachments_error: string | null }>(
+      "SELECT attachments_attempts, attachments_error FROM inbound_messages WHERE id = ANY($1) ORDER BY id",
+      [[bad1.id, bad2.id, bad3.id]],
+    );
+    expect(rows.every((r) => r.attachments_attempts === MAX_ATTACHMENT_TRIES)).toBe(true);
+    expect(rows[0].attachments_error).toContain("not found");
+    expect(last).toMatchObject({ messages: 0, failed: 0, abandoned: 3 }); // given up on, and reported
   });
 
   it("trusts the bytes it received over the size Graph listed", async () => {

@@ -1,4 +1,5 @@
 import { closeDb, db } from "../src/lib/db.ts";
+import { FREE_MAIL_DOMAINS } from "../src/lib/mail/match.ts";
 
 // Manage expert network vendors and their intake addresses.
 //   npm run vendors -- list
@@ -19,6 +20,12 @@ try {
     // domain always counts, so this is only for replies that come from another domain.
     const list = email === "none" ? [] : email.toLowerCase().split(",").map((d) => d.trim());
     if (list.some((d) => !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d))) throw new Error("domains look like example.com");
+    const personal = list.filter((d) => FREE_MAIL_DOMAINS.has(d));
+    if (personal.length) {
+      throw new Error(
+        `${personal.join(", ")} is a personal-mail domain: anyone can have an address there, so it cannot identify a vendor. Use the vendor's exact address as its intake email instead.`,
+      );
+    }
     const rows = await db.query("UPDATE vendors SET domains = $2 WHERE name = $1 RETURNING id", [name, list]);
     if (!rows.length) throw new Error(`no vendor named "${name}"`);
     console.log(`${name}: extra domains ${list.length ? list.join(", ") : "cleared"}`);

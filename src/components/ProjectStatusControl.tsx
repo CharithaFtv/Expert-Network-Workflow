@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { pickNext } from "@/lib/statusChoice";
 
 /** Moves a project to its next state. `options` come from the server, so only allowed moves are offered. */
 export function ProjectStatusControl({
@@ -15,7 +16,10 @@ export function ProjectStatusControl({
 }) {
   const router = useRouter();
   const choices = options.filter((o) => o !== "Closed" || canClose);
-  const [next, setNext] = useState(choices[0] ?? "");
+  // The picked value is only used while it is still on offer. After a move the options change, so the
+  // select falls back to the first new option instead of keeping the status the project just left.
+  const [picked, setNext] = useState("");
+  const next = pickNext(picked, choices);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 

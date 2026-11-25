@@ -132,6 +132,7 @@ describe("closing and retention", () => {
   });
 
   it("leaves mail that arrives after the close with no due date when no period is set", async () => {
+    vi.stubEnv("SENDER_AUTH", "off"); // this test is about retention, not sender authentication
     const p = await project();
     await changeProjectStatus(p.id, as(ALICE), "Closed", {});
     await db.query(
@@ -148,6 +149,7 @@ describe("closing and retention", () => {
 
   it("gives mail that arrives after the close the same retention when a period is set", async () => {
     vi.stubEnv("RETENTION_DAYS_AFTER_CLOSE", "0");
+    vi.stubEnv("SENDER_AUTH", "off"); // this test is about retention, not sender authentication
     const p = await project();
     await changeProjectStatus(p.id, as(ALICE), "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" });
     await db.query(

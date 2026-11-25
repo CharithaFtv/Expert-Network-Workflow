@@ -1,12 +1,19 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { pollInbox } from "@/lib/mail/inbound";
 import type { InboundMessage, InboxReader } from "@/lib/mail/inbox";
-import { assignToProject, domainOf, matchPending, referencedIds } from "@/lib/mail/match";
+import { assignToProject, domainOf, matchPending, referencedIds, senderAuthenticated } from "@/lib/mail/match";
 import { createProject } from "@/lib/projects";
+import { changeProjectStatus } from "@/lib/projectStatus";
 import { ALICE, person, resetDb, validBrief } from "./helpers";
 
-beforeEach(resetDb);
+// Most tests here are about which project and vendor a message belongs to, so sender authentication is
+// switched off for them; the "sender authentication" tests switch it back on.
+beforeEach(async () => {
+  await resetDb();
+  vi.stubEnv("SENDER_AUTH", "off");
+});
+afterEach(() => vi.unstubAllEnvs());
 
 async function project(vendorIds = [1]) {
   const r = await createProject(validBrief({ vendorIds }), person(ALICE));
@@ -244,6 +251,102 @@ describe("poll integration", () => {
     expect(dry.matching).toBeUndefined();
     const real = await pollInbox(reader);
     expect(real.matching).toEqual({ matched: 1, unverified: 0, unmatched: 0 });
+  });
+});
+
+const hdr = (name: string, value: string) => ({ name, value });
+
+describe("sender authentication", () => {
+  it("accepts internal mail, a DMARC pass, or SPF and DKIM passes, and nothing else", () => {
+    const check = (headers: { name: string; value: string }[] | null) => senderAuthenticated(headers, {});
+    expect(check([hdr("X-MS-Exchange-Organization-AuthAs", "Internal")])).toBe(true);
+    expect(check([hdr("Authentication-Results", "mx.microsoft.com 1; spf=none; dkim=none; dmarc=pass action=none")])).toBe(true);
+    expect(check([hdr("authentication-results", "mx; SPF=Pass; DKIM=Pass; dmarc=bestguesspass")])).toBe(true);
+    expect(check([hdr("Authentication-Results", "mx; spf=pass; dkim=none; dmarc=none")])).toBe(false);
+    expect(check([hdr("Authentication-Results", "mx; dkim=fail; spf=fail; dmarc=fail")])).toBe(false);
+    expect(check([hdr("X-MS-Exchange-Organization-AuthAs", "Anonymous")])).toBe(false);
+    expect(check([])).toBe(false);
+    expect(check(null)).toBe(false);
+  });
+
+  it("can be switched off for local development", () => {
+    expect(senderAuthenticated(null, { SENDER_AUTH: "off" })).toBe(true);
+    expect(senderAuthenticated(null, { SENDER_AUTH: " OFF " })).toBe(true);
+    expect(senderAuthenticated(null, { SENDER_AUTH: "require" })).toBe(false);
+  });
+
+  it("leaves a message from a known vendor domain Unverified until it is authenticated, and says why", async () => {
+    vi.stubEnv("SENDER_AUTH", "");
+    const p = await project();
+    const subject = `[${p.code}] x`;
+    const none = await inbound({ subject });
+    const failed = await inbound({ subject, headers: [hdr("Authentication-Results", "mx; dmarc=fail; spf=fail; dkim=fail")] });
+    const dmarc = await inbound({ subject, headers: [hdr("Authentication-Results", "mx; dmarc=pass action=none")] });
+    const internal = await inbound({ subject, headers: [hdr("X-MS-Exchange-Organization-AuthAs", "Internal")] });
+    await matchPending();
+    expect((await outcome(none)).status).toBe("Unverified");
+    expect((await outcome(failed)).status).toBe("Unverified");
+    expect((await outcome(dmarc)).status).toBe("Matched");
+    expect((await outcome(internal)).status).toBe("Matched");
+    const [note] = await db.query<{ sender_note: string | null }>("SELECT sender_note FROM inbound_messages WHERE id = $1", [none]);
+    expect(note.sender_note).toMatch(/not authenticated/);
+    const [ok] = await db.query<{ sender_note: string | null }>("SELECT sender_note FROM inbound_messages WHERE id = $1", [dmarc]);
+    expect(ok.sender_note).toBeNull();
+  });
+});
+
+describe("personal-mail domains", () => {
+  it("never identify a vendor by domain, only by the vendor's exact address", async () => {
+    await db.query("UPDATE vendors SET intake_email = 'vendorperson@gmail.com', domains = '{gmail.com}' WHERE id = 1");
+    const p = await project();
+    const exact = await inbound({ subject: `[${p.code}] x`, from: "VendorPerson@gmail.com" });
+    const other = await inbound({ subject: `[${p.code}] x`, from: "someoneelse@gmail.com" });
+    await matchPending();
+    expect(await outcome(exact)).toMatchObject({ status: "Matched", vendor_id: 1 });
+    expect(await outcome(other)).toMatchObject({ status: "Unverified", vendor_id: null });
+    const [note] = await db.query<{ sender_note: string }>("SELECT sender_note FROM inbound_messages WHERE id = $1", [other]);
+    expect(note.sender_note).toMatch(/personal-mail/);
+  });
+});
+
+describe("re-assigning a message", () => {
+  it("does not carry one project's retention date to another project", async () => {
+    const a = await project();
+    const b = await project();
+    const id = await inbound({ subject: `[${a.code}] x` });
+    await matchPending();
+    await changeProjectStatus(a.id, { id: ALICE, name: person(ALICE).name }, "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" });
+    const dated = await db.query<{ retain_until: string | null }>("SELECT retain_until FROM inbound_messages WHERE id = $1", [id]);
+    expect(dated[0].retain_until).not.toBeNull(); // dated because project A closed
+
+    await assignToProject(id, b.id); // moved to open project B
+    const after = await db.query<{ retain_until: string | null; project_id: number }>(
+      "SELECT retain_until, project_id FROM inbound_messages WHERE id = $1",
+      [id],
+    );
+    expect(after[0]).toEqual({ retain_until: null, project_id: b.id });
+  });
+
+  it("removes stored attachments when a message stops being verified, so they can be fetched again if it is verified later", async () => {
+    const p = await project();
+    const id = await inbound({ subject: `[${p.code}] x` });
+    await matchPending();
+    await db.query(
+      `INSERT INTO inbound_attachments (message_id, graph_attachment_id, name, size_bytes, status, content, created_at)
+       VALUES ($1, 'a', 'cv.pdf', 3, 'Stored', $2, $3)`,
+      [id, Buffer.from("abc"), new Date().toISOString()],
+    );
+    await db.query("UPDATE inbound_messages SET attachments_fetched_at = $2 WHERE id = $1", [id, new Date().toISOString()]);
+
+    await db.query("UPDATE vendors SET active = 0"); // the sender is no longer a known vendor
+    const r = await assignToProject(id, p.id);
+    expect(r.status).toBe("Unverified");
+    expect((await db.query("SELECT 1 FROM inbound_attachments WHERE message_id = $1", [id])).length).toBe(0);
+    const [m] = await db.query<{ attachments_fetched_at: string | null }>(
+      "SELECT attachments_fetched_at FROM inbound_messages WHERE id = $1",
+      [id],
+    );
+    expect(m.attachments_fetched_at).toBeNull();
   });
 });
 

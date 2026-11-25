@@ -117,16 +117,16 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
               <dt>Sector</dt>
               <dd>{project.sector || "Not set"}</dd>
             </dl>
-            <p className="hint">Status as recorded when the request was submitted.</p>
+            <p className="hint">Deal status as recorded in DealCloud when the request was submitted.</p>
           </section>
 
           <section className="card stack">
             <h2>Project status</h2>
-            <div className="deal">
-              <strong>{project.status}</strong>
+            <div>
               <span className="tag blue">{project.status}</span>
             </div>
             <ProjectStatusControl
+              key={project.status}
               projectId={project.id}
               options={[...nextStatuses(project.status)]}
               canClose={project.requester_id === user.id}

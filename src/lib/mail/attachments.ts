@@ -26,13 +26,23 @@ export interface AttachmentSource {
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
 
-/** Programs, scripts, installers and macro-enabled Office files: recorded, never stored. */
+/** Programs, scripts, installers, shortcuts and macro-enabled Office files: recorded, never stored. */
 const BLOCKED = new Set([
-  "exe", "dll", "com", "scr", "msi", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "jar", "lnk", "hta",
-  "docm", "xlsm", "pptm", "dotm", "xltm", "xlam", "iso", "dmg", "apk",
+  "exe", "dll", "com", "scr", "msi", "msp", "mst", "bat", "cmd", "ps1", "psm1", "psd1", "vbs", "vbe", "vb", "js",
+  "jse", "wsf", "ws", "wsh", "wsc", "jar", "jnlp", "lnk", "hta", "cpl", "scf", "inf", "reg", "pif", "chm", "msc",
+  "sys", "ocx", "drv", "gadget", "application", "appx", "msix", "appxbundle", "msixbundle", "sh", "bash", "zsh",
+  "csh", "py", "pl", "rb", "app", "pkg", "deb", "rpm", "bin", "ipa", "apk", "iso", "dmg", "docm", "xlsm", "pptm",
+  "dotm", "xltm", "xlam", "ppam", "sldm", "xla", "iqy", "slk",
 ]);
 
-const extension = (name: string) => (name.includes(".") ? name.split(".").pop()!.toLowerCase() : "");
+/** Control and bidirectional-override characters can hide a real extension; trailing dots and spaces are ignored by Windows. */
+const normalizedName = (name: string) =>
+  name.replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩﻿]/g, "").replace(/[.\s]+$/, "");
+
+const extension = (name: string) => {
+  const n = normalizedName(name);
+  return n.includes(".") ? n.split(".").pop()!.trim().toLowerCase() : "";
+};
 
 /** Why this attachment should not be stored, or null if it can be. */
 export function skipReason(a: AttachmentInfo, storedBytes: number): string | null {
@@ -44,7 +54,10 @@ export function skipReason(a: AttachmentInfo, storedBytes: number): string | nul
   return null;
 }
 
-const cleanName = (s: string) => s.replaceAll("\u0000", "").slice(0, 255) || "unnamed";
+const cleanName = (s: string) => normalizedName(s).slice(0, 255) || "unnamed";
+
+/** After this many failed runs a message is left alone and reported, so it cannot block newer ones. */
+export const MAX_ATTACHMENT_TRIES = 5;
 
 type Prepared = { info: AttachmentInfo; reason: string | null; bytes: Buffer | null };
 
@@ -55,6 +68,8 @@ export type AttachmentCounts = {
   failed: number;
   /** The first few failure reasons, for the operator. */
   errors: string[];
+  /** Messages given up on after MAX_ATTACHMENT_TRIES failed runs; they need a person. */
+  abandoned: number;
 };
 
 /**
@@ -62,12 +77,14 @@ export type AttachmentCounts = {
  * all its rows written together; a failure leaves that message for the next run.
  */
 export async function fetchAttachments(source: AttachmentSource, limit = 50): Promise<AttachmentCounts> {
-  const counts: AttachmentCounts = { messages: 0, stored: 0, skipped: 0, failed: 0, errors: [] };
+  const counts: AttachmentCounts = { messages: 0, stored: 0, skipped: 0, failed: 0, errors: [], abandoned: 0 };
+  // Fewest failures first, so a message that keeps failing cannot hold up the ones behind it.
   const rows = await db.query<{ id: number; graph_id: string }>(
     `SELECT id, graph_id FROM inbound_messages
      WHERE status = 'Matched' AND has_attachments AND attachments_fetched_at IS NULL AND purged_at IS NULL
-     ORDER BY id LIMIT $1`,
-    [limit],
+       AND attachments_attempts < $2
+     ORDER BY attachments_attempts, id LIMIT $1`,
+    [limit, MAX_ATTACHMENT_TRIES],
   );
   for (const m of rows) {
     try {
@@ -113,10 +130,24 @@ export async function fetchAttachments(source: AttachmentSource, limit = 50): Pr
       counts.messages++;
       for (const p of prepared) p.bytes ? counts.stored++ : counts.skipped++;
     } catch (e) {
-      counts.failed++; // left for the next run
-      if (counts.errors.length < 3) counts.errors.push(`message ${m.id}: ${(e as Error).message}`);
+      counts.failed++; // retried on a later run, until MAX_ATTACHMENT_TRIES
+      const reason = (e as Error).message;
+      if (counts.errors.length < 3) counts.errors.push(`message ${m.id}: ${reason}`);
+      await db
+        .query("UPDATE inbound_messages SET attachments_attempts = attachments_attempts + 1, attachments_error = $2 WHERE id = $1", [
+          m.id,
+          reason.slice(0, 500),
+        ])
+        .catch(() => {}); // recording the failure must not hide the real one
     }
   }
+  const [gone] = await db.query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM inbound_messages
+     WHERE status = 'Matched' AND has_attachments AND attachments_fetched_at IS NULL AND purged_at IS NULL
+       AND attachments_attempts >= $1`,
+    [MAX_ATTACHMENT_TRIES],
+  );
+  counts.abandoned = gone.n;
   return counts;
 }
 

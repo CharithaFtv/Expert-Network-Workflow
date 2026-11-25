@@ -1,4 +1,4 @@
-import { db } from "../db.ts";
+import { db, tx } from "../db.ts";
 import { retainUntilForProject } from "../projectStatus.ts";
 
 /**
@@ -11,7 +11,9 @@ import { retainUntilForProject } from "../projectStatus.ts";
  * No hit: Unmatched, for a person to assign.
  *
  * Sender: the domain must belong to an active vendor on the vendor list (intake address domain or the
- * vendor's `domains`). If not, the message is Unverified and never goes on to the model.
+ * vendor's `domains`; a personal-mail domain needs the vendor's exact address), and the receiving mail
+ * system must have authenticated the sender (SPF, DKIM or DMARC). If not, the message is Unverified and
+ * never goes on to the model.
  * Matching never guesses: an unknown code, no hit or an unknown sender all stop at a person.
  */
 export type MatchMethod = "subject_code" | "conversation" | "header" | "manual";
@@ -23,6 +25,8 @@ export type MatchResult = {
   vendorId: number | null;
   method: MatchMethod | null;
   senderVerified: boolean;
+  /** Why the sender was not verified (null when verified). */
+  senderNote: string | null;
 };
 
 type Row = {
@@ -83,32 +87,92 @@ async function findProject(m: Row): Promise<{ projectId: number; method: MatchMe
   return null;
 }
 
+/** Personal mailbox providers: anyone can have an address there, so a domain match proves nothing. */
+export const FREE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
+  "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "ymail.com",
+  "aol.com", "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.net",
+  "mail.com", "yandex.com", "zoho.com", "fastmail.com", "hey.com", "qq.com", "163.com", "126.com",
+]);
+
 /**
- * Is the sender from a known vendor? Verified means the sender's domain belongs to any active vendor on
- * the vendor list. The vendor is named only when it is certain and it is one of the project's vendors.
+ * Did the receiving mail system authenticate the sender? Read from the headers Exchange adds.
+ *   - mail from inside our own tenant (AuthAs: Internal) counts
+ *   - otherwise DMARC must have passed, or both SPF and DKIM
+ *   - anything else (fail, none, no header) does not
+ * SENDER_AUTH=off skips the check (local development without real vendor mail). Default: on.
  */
-async function checkSender(address: string | null, projectId: number | null) {
+export function senderAuthenticated(
+  headers: Row["headers"],
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if ((env.SENDER_AUTH ?? "").trim().toLowerCase() === "off") return true;
+  const values = (name: string) =>
+    (headers ?? []).filter((h) => h.name.toLowerCase() === name).map((h) => h.value.toLowerCase());
+  if (values("x-ms-exchange-organization-authas").some((v) => v.trim() === "internal")) return true;
+  const results = values("authentication-results").join(" ");
+  if (/\bdmarc=pass\b/.test(results)) return true;
+  return /\bspf=pass\b/.test(results) && /\bdkim=pass\b/.test(results);
+}
+
+type SenderCheck = { verified: boolean; vendorId: number | null; note: string | null };
+
+/**
+ * Is the sender from a known vendor, and was the sender authenticated?
+ * Domain: the sender's domain belongs to an active vendor on the vendor list. A personal-mail domain
+ * never counts as a domain; there only a vendor's exact intake address does.
+ * The vendor is named only when it is certain and it is one of the project's vendors.
+ */
+async function checkSender(
+  address: string | null,
+  projectId: number | null,
+  headers: Row["headers"],
+  env: Record<string, string | undefined>,
+): Promise<SenderCheck> {
   const domain = domainOf(address);
-  if (!domain) return { verified: false, vendorId: null };
+  if (!domain) return { verified: false, vendorId: null, note: "no sender address" };
   const vendors = await db.query<VendorRow & { on_project: boolean }>(
     `SELECT v.id, v.intake_email, v.domains, (pv.vendor_id IS NOT NULL) AS on_project
      FROM vendors v LEFT JOIN project_vendors pv ON pv.vendor_id = v.id AND pv.project_id = $1
      WHERE v.active = 1`,
     [projectId],
   );
-  const sameDomain = vendors.filter((v) => vendorDomains(v).has(domain));
-  const onProject = sameDomain.filter((v) => v.on_project);
+  const free = FREE_MAIL_DOMAINS.has(domain);
+  const known = vendors.filter((v) =>
+    free ? v.intake_email?.toLowerCase() === address!.toLowerCase() : vendorDomains(v).has(domain),
+  );
+  if (!known.length) {
+    return {
+      verified: false,
+      vendorId: null,
+      note: free ? "personal-mail address that is not a vendor's own address" : "sender domain is not on the vendor list",
+    };
+  }
+  const onProject = known.filter((v) => v.on_project);
   const exact = onProject.filter((v) => v.intake_email?.toLowerCase() === address!.toLowerCase());
   // Exact address first; otherwise only a single project vendor on that domain is certain.
   const vendorId = exact.length === 1 ? exact[0].id : onProject.length === 1 ? onProject[0].id : null;
-  return { verified: sameDomain.length > 0, vendorId };
+  if (!senderAuthenticated(headers, env)) {
+    return { verified: false, vendorId, note: "sender not authenticated (SPF, DKIM or DMARC)" };
+  }
+  return { verified: true, vendorId, note: null };
 }
 
-export async function decide(m: Row, forced?: { projectId: number; method: MatchMethod }): Promise<MatchResult> {
+export async function decide(
+  m: Row,
+  forced?: { projectId: number; method: MatchMethod },
+  env: Record<string, string | undefined> = process.env,
+): Promise<MatchResult> {
   const found = forced ?? (await findProject(m));
-  const sender = await checkSender(m.from_address, found?.projectId ?? null);
+  const sender = await checkSender(m.from_address, found?.projectId ?? null, m.headers, env);
   if (!found) {
-    return { status: "Unmatched", projectId: null, vendorId: null, method: null, senderVerified: sender.verified };
+    return {
+      status: "Unmatched",
+      projectId: null,
+      vendorId: null,
+      method: null,
+      senderVerified: sender.verified,
+      senderNote: sender.note,
+    };
   }
   return {
     status: sender.verified ? "Matched" : "Unverified",
@@ -116,21 +180,33 @@ export async function decide(m: Row, forced?: { projectId: number; method: Match
     vendorId: sender.vendorId,
     method: found.method,
     senderVerified: sender.verified,
+    senderNote: sender.note,
   };
 }
 
+/**
+ * Writes the outcome. The retention date always follows the project the message is on now (none if it
+ * has no project or the project is not closed), so a re-assigned message never keeps another project's
+ * date. A message that is no longer Matched loses its stored attachments: untrusted mail keeps no files.
+ */
 async function save(id: number, r: MatchResult) {
-  await db.query(
-    `UPDATE inbound_messages
-     SET status = $2, project_id = $3, vendor_id = $4, match_method = $5, sender_verified = $6, matched_at = $7
-     WHERE id = $1`,
-    [id, r.status, r.projectId, r.vendorId, r.method, r.senderVerified, new Date().toISOString()],
-  );
-  // Mail for a project that is already closed expires on the same terms as the rest of its mail.
-  if (r.projectId) {
-    const until = await retainUntilForProject(r.projectId);
-    if (until) await db.query("UPDATE inbound_messages SET retain_until = $2 WHERE id = $1", [id, until]);
-  }
+  const until = r.projectId ? await retainUntilForProject(r.projectId) : null;
+  await tx(async (q) => {
+    await q.query(
+      `UPDATE inbound_messages
+       SET status = $2, project_id = $3, vendor_id = $4, match_method = $5, sender_verified = $6,
+           sender_note = $7, matched_at = $8, retain_until = $9
+       WHERE id = $1`,
+      [id, r.status, r.projectId, r.vendorId, r.method, r.senderVerified, r.senderNote, new Date().toISOString(), until],
+    );
+    if (r.status !== "Matched") {
+      await q.query("DELETE FROM inbound_attachments WHERE message_id = $1", [id]);
+      await q.query(
+        "UPDATE inbound_messages SET attachments_fetched_at = NULL, attachments_attempts = 0, attachments_error = NULL WHERE id = $1",
+        [id],
+      );
+    }
+  });
 }
 
 export type MatchCounts = { matched: number; unverified: number; unmatched: number };
