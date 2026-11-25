@@ -5,7 +5,8 @@ import { purgeExpired } from "../src/lib/mail/attachments.ts";
 //   npm run purge-inbox              dry run: lists what would be purged, changes nothing
 //   npm run purge-inbox -- --apply   purges it: clears body, headers and attachment bytes (the rows stay)
 // Only messages whose retain_until has passed are touched. A project's mail gets that date when the
-// project is closed (see RETENTION_DAYS_AFTER_CLOSE). Purging cannot be undone.
+// project is closed, and only when RETENTION_DAYS_AFTER_CLOSE is set; while it is empty nothing is ever
+// due. Purging cannot be undone.
 let exitCode = 0;
 try {
   if (process.argv.includes("--apply")) {

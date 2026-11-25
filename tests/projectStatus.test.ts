@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { purgeExpired } from "@/lib/mail/attachments";
 import { matchPending } from "@/lib/mail/match";
@@ -12,6 +12,7 @@ import {
 import { ALICE, BOB, CAROL, person, resetDb, validBrief } from "./helpers";
 
 beforeEach(resetDb);
+afterEach(() => vi.unstubAllEnvs());
 
 async function project() {
   const r = await createProject(validBrief(), person(ALICE)); // ALICE requests, BOB is tagged
@@ -113,16 +114,42 @@ describe("closing and retention", () => {
     expect((await retain(unmatched)).retain_until).toBeNull();
   });
 
-  it("makes mail due straight away when no days are configured", async () => {
+  it("makes nothing due when no period is set", async () => {
     const p = await project();
     const m = await inbound(p.id);
     await changeProjectStatus(p.id, as(ALICE), "Closed", {});
+    expect((await row(p.id)).status).toBe("Closed");
+    expect((await retain(m)).retain_until).toBeNull();
+    expect(await purgeExpired()).toBe(0);
+    expect((await retain(m)).body).toBe("body text");
+  });
+
+  it("makes mail due straight away when the period is 0", async () => {
+    const p = await project();
+    const m = await inbound(p.id);
+    await changeProjectStatus(p.id, as(ALICE), "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" });
     expect((await retain(m)).retain_until).toBe((await row(p.id)).closed_at);
   });
 
-  it("gives mail that arrives after the close the same retention", async () => {
+  it("leaves mail that arrives after the close with no due date when no period is set", async () => {
     const p = await project();
     await changeProjectStatus(p.id, as(ALICE), "Closed", {});
+    await db.query(
+      `INSERT INTO inbound_messages (graph_id, received_at, from_address, subject, status, created_at)
+       VALUES ('late0', $1, 'intake1@vendor.test', $2, 'Received', $1)`,
+      [new Date().toISOString(), `Re: [${p.code}] late`],
+    );
+    await matchPending();
+    const [m] = await db.query<{ status: string; retain_until: string | null }>(
+      "SELECT status, retain_until FROM inbound_messages WHERE graph_id = 'late0'",
+    );
+    expect(m).toEqual({ status: "Matched", retain_until: null });
+  });
+
+  it("gives mail that arrives after the close the same retention when a period is set", async () => {
+    vi.stubEnv("RETENTION_DAYS_AFTER_CLOSE", "0");
+    const p = await project();
+    await changeProjectStatus(p.id, as(ALICE), "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" });
     await db.query(
       `INSERT INTO inbound_messages (graph_id, received_at, from_address, subject, status, created_at)
        VALUES ('late', $1, 'intake1@vendor.test', $2, 'Received', $1)`,
@@ -141,7 +168,7 @@ describe("closing and retention", () => {
     const open = await project();
     const mine = await inbound(p.id);
     const theirs = await inbound(open.id);
-    await changeProjectStatus(p.id, as(ALICE), "Closed", {});
+    await changeProjectStatus(p.id, as(ALICE), "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" });
     expect((await retain(mine)).body).toBe("body text"); // closing alone deletes nothing
     expect(await purgeExpired()).toBe(1);
     expect(await retain(mine)).toMatchObject({ body: "" });
@@ -151,9 +178,10 @@ describe("closing and retention", () => {
 });
 
 describe("retention setting", () => {
-  it("defaults to 0 days and reads a whole number", () => {
-    expect(retentionDaysAfterClose({})).toBe(0);
-    expect(retentionDaysAfterClose({ RETENTION_DAYS_AFTER_CLOSE: " " })).toBe(0);
+  it("is null when unset, and reads a whole number otherwise", () => {
+    expect(retentionDaysAfterClose({})).toBeNull();
+    expect(retentionDaysAfterClose({ RETENTION_DAYS_AFTER_CLOSE: " " })).toBeNull();
+    expect(retentionDaysAfterClose({ RETENTION_DAYS_AFTER_CLOSE: "0" })).toBe(0);
     expect(retentionDaysAfterClose({ RETENTION_DAYS_AFTER_CLOSE: "90" })).toBe(90);
   });
   it("refuses anything else instead of guessing", () => {

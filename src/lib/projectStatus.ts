@@ -25,12 +25,13 @@ export const isProjectStatus = (s: unknown): s is ProjectStatus =>
 export const nextStatuses = (from: string): readonly ProjectStatus[] => (isProjectStatus(from) ? NEXT[from] : []);
 
 /**
- * Days to keep a closed project's mail before it can be purged. Unset means 0: the content becomes
- * eligible as soon as the project closes. Nothing is deleted until `npm run purge-inbox -- --apply` runs.
+ * Days to keep a closed project's mail before it is due for purging, or null when no period is set.
+ * Null means closing a project makes nothing due: no retention date is set until a period is agreed.
+ * 0 means due as soon as the project closes. Nothing is deleted until `npm run purge-inbox -- --apply` runs.
  */
-export function retentionDaysAfterClose(env: Record<string, string | undefined> = process.env): number {
+export function retentionDaysAfterClose(env: Record<string, string | undefined> = process.env): number | null {
   const raw = env.RETENTION_DAYS_AFTER_CLOSE;
-  if (raw === undefined || raw.trim() === "") return 0;
+  if (raw === undefined || raw.trim() === "") return null;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > 3650) {
     throw new Error("RETENTION_DAYS_AFTER_CLOSE must be a whole number of days, 0 to 3650.");
@@ -83,8 +84,9 @@ export async function changeProjectStatus(
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [projectId, p.status, to, user.id, user.name, now],
     );
-    if (to === "Closed") {
+    if (to === "Closed" && days !== null) {
       // Start the retention clock for everything already received on this project.
+      // With no period set (days is null) nothing is made due.
       await q.query(
         "UPDATE inbound_messages SET retain_until = $2 WHERE project_id = $1 AND retain_until IS NULL AND purged_at IS NULL",
         [projectId, retainUntilAfterClose(now, days)],
@@ -97,5 +99,6 @@ export async function changeProjectStatus(
 /** A message that arrives for a project that is already closed expires on the same terms. */
 export async function retainUntilForProject(projectId: number): Promise<string | null> {
   const [p] = await db.query<{ closed_at: string | null }>("SELECT closed_at FROM projects WHERE id = $1", [projectId]);
-  return p?.closed_at ? retainUntilAfterClose(p.closed_at, retentionDaysAfterClose()) : null;
+  const days = retentionDaysAfterClose();
+  return p?.closed_at && days !== null ? retainUntilAfterClose(p.closed_at, days) : null;
 }
