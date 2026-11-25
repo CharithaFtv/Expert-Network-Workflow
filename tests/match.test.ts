@@ -243,6 +243,42 @@ describe("assignToProject", () => {
     const id = await inbound();
     await expect(assignToProject(id, 99999)).rejects.toThrow(/No project/);
   });
+
+  it("is not overwritten by an automatic match that was already under way", async () => {
+    const a = await project();
+    const b = await project();
+    const id = await inbound({ subject: `[${a.code}] x` });
+    const other = await inbound({ subject: "later one", conversation: "c9" }); // still handled normally
+    // The matcher has read its list of waiting messages; before it saves this one, a person assigns it to B.
+    const real = db.query.bind(db);
+    let assigned = false;
+    const spy = vi.spyOn(db, "query").mockImplementation(async (text: string, params?: unknown[]) => {
+      if (!assigned && text.includes("FROM projects WHERE upper(code)")) {
+        assigned = true;
+        await assignToProject(id, b.id);
+      }
+      return real(text, params);
+    });
+    let counts;
+    try {
+      counts = await matchPending();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(assigned).toBe(true);
+    expect(await outcome(id)).toMatchObject({ status: "Matched", project_id: b.id, match_method: "manual" });
+    expect(counts).toEqual({ matched: 0, unverified: 0, unmatched: 1 }); // only the other message was matched by the run
+    expect((await outcome(other)).status).toBe("Unmatched");
+  });
+
+  it("still lets a person override an earlier automatic match", async () => {
+    const a = await project();
+    const b = await project();
+    const id = await inbound({ subject: `[${a.code}] x` });
+    await matchPending();
+    await assignToProject(id, b.id);
+    expect(await outcome(id)).toMatchObject({ project_id: b.id, match_method: "manual" });
+  });
 });
 
 describe("poll integration", () => {

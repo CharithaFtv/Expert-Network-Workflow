@@ -193,17 +193,22 @@ export async function decide(
  * Writes the outcome. The retention date always follows the project the message is on now (none if it
  * has no project or the project is not closed), so a re-assigned message never keeps another project's
  * date. A message that is no longer Matched loses its stored attachments: untrusted mail keeps no files.
+ * An automatic save (`onlyIfReceived`) only writes if the message is still Received: matching works from a
+ * snapshot, so a person may have assigned the message meanwhile, and their decision must stand. A manual
+ * assignment is an explicit override and always writes. Returns whether anything was written.
  */
-async function save(id: number, r: MatchResult) {
+async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise<boolean> {
   const until = r.projectId ? await retainUntilForProject(r.projectId) : null;
-  await tx(async (q) => {
-    await q.query(
+  return tx(async (q) => {
+    const rows = await q.query(
       `UPDATE inbound_messages
        SET status = $2, project_id = $3, vendor_id = $4, match_method = $5, sender_verified = $6,
            sender_note = $7, matched_at = $8, retain_until = $9
-       WHERE id = $1`,
+       WHERE id = $1 ${onlyIfReceived ? "AND status = 'Received'" : ""}
+       RETURNING id`,
       [id, r.status, r.projectId, r.vendorId, r.method, r.senderVerified, r.senderNote, new Date().toISOString(), until],
     );
+    if (!rows.length) return false; // changed by someone else since it was read: write nothing more
     if (r.status !== "Matched") {
       await q.query("DELETE FROM inbound_attachments WHERE message_id = $1", [id]);
       await q.query(
@@ -211,6 +216,7 @@ async function save(id: number, r: MatchResult) {
         [id],
       );
     }
+    return true;
   });
 }
 
@@ -228,7 +234,7 @@ export async function matchPending(): Promise<MatchCounts> {
   );
   for (const m of rows) {
     const r = await decide(m);
-    await save(m.id, r);
+    if (!(await save(m.id, r, true))) continue; // a person got there first: leave their decision alone
     if (r.status === "Matched") counts.matched++;
     else if (r.status === "Unverified") counts.unverified++;
     else counts.unmatched++;
