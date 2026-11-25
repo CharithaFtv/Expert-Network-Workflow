@@ -5,8 +5,8 @@
 ALTER TABLE vendors ADD COLUMN domains TEXT[] NOT NULL DEFAULT '{}';
 
 -- status flow: Received -> Matched | Unverified | Unmatched
---   Matched    project found and the sender's domain belongs to a vendor on that project
---   Unverified project found but the sender's domain is not one of that project's vendors (never reaches the model)
+--   Matched    project found and the sender's domain belongs to an active vendor on the vendor list
+--   Unverified project found but the sender's domain is not a known vendor domain (never reaches the model)
 --   Unmatched  no project found; a person assigns it
 ALTER TABLE inbound_messages
   ADD COLUMN project_id INTEGER REFERENCES projects(id),

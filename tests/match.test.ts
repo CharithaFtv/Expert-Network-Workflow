@@ -121,15 +121,20 @@ describe("sender check", () => {
     expect(await outcome(id)).toMatchObject({ status: "Matched", vendor_id: 1 });
   });
 
-  it("does not take another project's vendor as proof", async () => {
-    const p = await project([1]);
-    const id = await inbound({ subject: `[${p.code}] x`, from: "intake2@vendor.test" }); // vendor 2 is not on p
+  it("accepts any vendor on the list, but names only a vendor that is on the project", async () => {
     await db.query("UPDATE vendors SET intake_email = 'intake2@other2.test' WHERE id = 2");
+    const p = await project([1]); // vendor 2 is on the list but not on this project
+    const id = await inbound({ subject: `[${p.code}] x`, from: "intake2@other2.test" });
     await matchPending();
-    expect((await outcome(id)).status).toBe("Matched"); // same vendor.test domain as vendor 1
-    const id2 = await inbound({ subject: `[${p.code}] x`, from: "intake2@other2.test" });
+    expect(await outcome(id)).toMatchObject({ status: "Matched", vendor_id: null, sender_verified: true });
+  });
+
+  it("does not accept the domain of an inactive vendor", async () => {
+    await db.query("UPDATE vendors SET intake_email = 'intake2@other2.test', active = 0 WHERE id = 2");
+    const p = await project([1]);
+    const id = await inbound({ subject: `[${p.code}] x`, from: "intake2@other2.test" });
     await matchPending();
-    expect((await outcome(id2)).status).toBe("Unverified"); // other2.test belongs to a vendor not on p
+    expect((await outcome(id)).status).toBe("Unverified");
   });
 
   it("treats a missing sender as unverified", async () => {

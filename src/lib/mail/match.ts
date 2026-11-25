@@ -9,7 +9,7 @@ import { db } from "../db.ts";
  *   3. header        In-Reply-To / References pointing at an earlier matched and verified message
  * No hit: Unmatched, for a person to assign.
  *
- * Sender: the domain must belong to a vendor on the matched project (intake address domain or the
+ * Sender: the domain must belong to an active vendor on the vendor list (intake address domain or the
  * vendor's `domains`). If not, the message is Unverified and never goes on to the model.
  * Matching never guesses: an unknown code, no hit or an unknown sender all stop at a person.
  */
@@ -82,21 +82,24 @@ async function findProject(m: Row): Promise<{ projectId: number; method: MatchMe
   return null;
 }
 
-/** Is the sender a vendor on this project? Also names the vendor when it is certain. */
+/**
+ * Is the sender from a known vendor? Verified means the sender's domain belongs to any active vendor on
+ * the vendor list. The vendor is named only when it is certain and it is one of the project's vendors.
+ */
 async function checkSender(address: string | null, projectId: number | null) {
   const domain = domainOf(address);
   if (!domain) return { verified: false, vendorId: null };
-  const vendors = projectId
-    ? await db.query<VendorRow>(
-        `SELECT v.id, v.intake_email, v.domains FROM vendors v
-         JOIN project_vendors pv ON pv.vendor_id = v.id AND pv.project_id = $1`,
-        [projectId],
-      )
-    : await db.query<VendorRow>("SELECT id, intake_email, domains FROM vendors WHERE active = 1");
+  const vendors = await db.query<VendorRow & { on_project: boolean }>(
+    `SELECT v.id, v.intake_email, v.domains, (pv.vendor_id IS NOT NULL) AS on_project
+     FROM vendors v LEFT JOIN project_vendors pv ON pv.vendor_id = v.id AND pv.project_id = $1
+     WHERE v.active = 1`,
+    [projectId],
+  );
   const sameDomain = vendors.filter((v) => vendorDomains(v).has(domain));
-  const exact = sameDomain.filter((v) => v.intake_email?.toLowerCase() === address!.toLowerCase());
-  // Exact address first; otherwise only a single vendor on that domain is certain.
-  const vendorId = exact.length === 1 ? exact[0].id : sameDomain.length === 1 ? sameDomain[0].id : null;
+  const onProject = sameDomain.filter((v) => v.on_project);
+  const exact = onProject.filter((v) => v.intake_email?.toLowerCase() === address!.toLowerCase());
+  // Exact address first; otherwise only a single project vendor on that domain is certain.
+  const vendorId = exact.length === 1 ? exact[0].id : onProject.length === 1 ? onProject[0].id : null;
   return { verified: sameDomain.length > 0, vendorId };
 }
 

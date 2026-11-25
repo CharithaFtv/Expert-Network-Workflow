@@ -40,5 +40,5 @@ export async function resetDb() {
   await db.query(
     "TRUNCATE inbound_failures, inbound_messages, mailbox_sync, notifications, outbox, project_vendors, project_members, projects RESTART IDENTITY CASCADE",
   );
-  await db.query("UPDATE vendors SET intake_email = 'intake' || id || '@vendor.test'");
+  await db.query("UPDATE vendors SET intake_email = 'intake' || id || '@vendor.test', domains = '{}', active = 1");
 }
