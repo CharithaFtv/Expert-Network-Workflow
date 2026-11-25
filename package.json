@@ -14,7 +14,8 @@
     "migrate": "node --env-file-if-exists=.env.local scripts/migrate.mjs",
     "vendors": "node --env-file-if-exists=.env.local scripts/vendors.ts",
     "send-outbox": "node --env-file-if-exists=.env.local scripts/send-outbox.ts",
-    "poll-inbox": "node --env-file-if-exists=.env.local scripts/poll-inbox.ts"
+    "poll-inbox": "node --env-file-if-exists=.env.local scripts/poll-inbox.ts",
+    "match-inbox": "node --env-file-if-exists=.env.local scripts/match-inbox.ts"
   },
   "dependencies": {
     "next": "16.4.6",

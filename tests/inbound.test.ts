@@ -39,7 +39,7 @@ beforeEach(resetDb);
 describe("pollInbox", () => {
   it("stores messages and saves the cursor", async () => {
     const r = await pollInbox(fakeReader([[msg(1), msg(2)], [msg(3)]]));
-    expect(r).toEqual({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
+    expect(r).toMatchObject({ fetched: 3, stored: 3, duplicates: 0, failed: [] });
     const [s] = await db.query<{ delta_link: string }>("SELECT delta_link FROM mailbox_sync");
     expect(s.delta_link).toBe("delta-1");
   });

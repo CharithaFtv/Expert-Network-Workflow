@@ -1,5 +1,6 @@
 import { db } from "../db.ts";
 import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inbox.ts";
+import { matchPending, type MatchCounts } from "./match.ts";
 
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
@@ -10,6 +11,8 @@ export type PollResult = {
   /** Graph IDs Postgres refused to store; each is kept in inbound_failures. */
   failed: string[];
   cursorReset?: boolean;
+  /** What matching did with the messages waiting after this poll (not in a dry run). */
+  matching?: MatchCounts;
 };
 
 /** Postgres text and JSONB cannot hold a NUL character; email can, so remove it before inserting. */
@@ -141,6 +144,11 @@ export async function pollInbox(
     next = await reader.readChanges(null, since, onPage);
   }
 
-  if (!opts.dryRun) await saveCursor(reader.name, next, since);
+  if (!opts.dryRun) {
+    await saveCursor(reader.name, next, since);
+    // After the cursor is safe: match everything still waiting. If this fails, the messages stay in
+    // `Received` and the next poll (or `npm run match-inbox`) matches them.
+    result.matching = await matchPending();
+  }
   return result;
 }
