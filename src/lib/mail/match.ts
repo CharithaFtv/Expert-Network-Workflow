@@ -237,9 +237,16 @@ async function save(id: number, r: MatchResult, onlyIfReceived = false): Promise
     );
     if (!rows.length) return false; // changed by someone else since it was read: write nothing more
     if (r.status !== "Matched") {
+      // Untrusted mail keeps nothing derived from it: no files, no cleaned text, no links. If it is verified
+      // later, the poll produces them again.
       await q.query("DELETE FROM inbound_attachments WHERE message_id = $1", [id]);
+      await q.query("DELETE FROM inbound_links WHERE message_id = $1", [id]);
       await q.query(
-        "UPDATE inbound_messages SET attachments_fetched_at = NULL, attachments_attempts = 0, attachments_error = NULL WHERE id = $1",
+        `UPDATE inbound_messages
+         SET attachments_fetched_at = NULL, attachments_attempts = 0, attachments_error = NULL,
+             text_clean = NULL, text_removed = NULL, clean_info = NULL, cleaned_at = NULL, clean_version = NULL,
+             clean_attempts = 0, clean_error = NULL
+         WHERE id = $1`,
         [id],
       );
     }

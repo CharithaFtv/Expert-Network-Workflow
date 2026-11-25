@@ -35,6 +35,14 @@ try {
     console.error(`attachments could not be fetched for ${result.attachments.failed} message(s); the next poll retries them: ${result.attachments.errors.join("; ")}`);
     exitCode = 1;
   }
+  if (result.cleaning?.failed) {
+    console.error(`cleaning failed for ${result.cleaning.failed} message(s); the next poll retries them: ${result.cleaning.errors.join("; ")}`);
+    exitCode = 1;
+  }
+  if (result.cleaning?.abandoned) {
+    console.error(`${result.cleaning.abandoned} message(s) could not be cleaned after several tries; they need a person.`);
+    exitCode = 1;
+  }
   if (result.attachments?.abandoned) {
     console.error(`${result.attachments.abandoned} message(s) had attachments that kept failing and were given up on; they need a person.`);
     exitCode = 1;

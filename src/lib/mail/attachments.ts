@@ -177,24 +177,28 @@ export async function fetchAttachments(source: AttachmentSource, limit = 50): Pr
 }
 
 /**
- * Removes the content of messages whose retention date has passed: body, headers and attachment bytes.
- * The row stays (ids, status, match result) so history is still traceable. Messages with no
- * retain_until are never touched, and nothing sets retain_until yet.
+ * Removes the content of messages whose retention date has passed: body, headers, cleaned text, links and
+ * attachment bytes. The row stays (ids, status, match result) so history is still traceable. Messages
+ * with no retain_until are never touched.
  */
 export async function purgeExpired(now = new Date()): Promise<number> {
   const stamp = now.toISOString();
   return tx(async (q) => {
     const rows = await q.query<{ id: number }>(
-      `UPDATE inbound_messages SET body = '', headers = NULL, purged_at = $1
+      `UPDATE inbound_messages
+       SET body = '', headers = NULL, text_clean = NULL, text_removed = NULL, clean_info = NULL, purged_at = $1
        WHERE retain_until IS NOT NULL AND retain_until <= $1 AND purged_at IS NULL RETURNING id`,
       [stamp],
     );
     if (rows.length) {
+      const ids = rows.map((r) => r.id);
       await q.query(
         `UPDATE inbound_attachments SET content = NULL, status = 'Purged'
          WHERE message_id = ANY($1) AND status = 'Stored'`,
-        [rows.map((r) => r.id)],
+        [ids],
       );
+      // A link can carry a secret in its address, so links go with the message.
+      await q.query("DELETE FROM inbound_links WHERE message_id = ANY($1)", [ids]);
     }
     return rows.length;
   });

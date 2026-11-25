@@ -2,6 +2,7 @@ import { db } from "../db.ts";
 import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inbox.ts";
 import { matchPending, type MatchCounts } from "./match.ts";
 import { fetchAttachments, type AttachmentCounts, type AttachmentSource } from "./attachments.ts";
+import { cleanPending, type CleanCounts } from "./clean.ts";
 
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
@@ -16,6 +17,8 @@ export type PollResult = {
   matching?: MatchCounts;
   /** Attachment handling for verified mail (only for a reader that can list attachments). */
   attachments?: AttachmentCounts;
+  /** Clean text and links produced for verified mail. */
+  cleaning?: CleanCounts;
   /** Follow-up steps that failed after the messages were stored (the poll itself succeeded). */
   errors: string[];
 };
@@ -166,6 +169,12 @@ export async function pollInbox(
       } catch (e) {
         result.errors.push(`attachments: ${(e as Error).message}`);
       }
+    }
+    // The clean text and links of verified mail (needs no network, so every poll can do it).
+    try {
+      result.cleaning = await cleanPending();
+    } catch (e) {
+      result.errors.push(`cleaning: ${(e as Error).message}`);
     }
   }
   return result;
