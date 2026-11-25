@@ -1,5 +1,6 @@
 import { GraphClient, safeText } from "./graph.ts";
 import { MailError } from "./transport.ts";
+import type { AttachmentInfo, AttachmentSource } from "./attachments.ts";
 
 /** One received email, as Graph describes it. */
 export type InboundMessage = {
@@ -90,7 +91,7 @@ export function toInboundMessage(m: GraphMessage): InboundMessage {
 const MAX_PAGES = 200;
 
 /** Reads the Inbox through a Graph delta query using immutable message IDs. Needs Application Mail.Read. */
-export class GraphInbox extends GraphClient implements InboxReader {
+export class GraphInbox extends GraphClient implements InboxReader, AttachmentSource {
   get name() {
     return `${this.cfg.mailbox.toLowerCase()}/inbox`;
   }
@@ -130,5 +131,47 @@ export class GraphInbox extends GraphClient implements InboxReader {
       url = nextLink;
     }
     throw new MailError(`Graph delta exceeded ${MAX_PAGES} pages`, "run");
+  }
+
+  /** Name, type and size of each attachment of a message. Nothing is downloaded. */
+  async listAttachments(graphId: string): Promise<AttachmentInfo[]> {
+    const res = await this.api(
+      `/messages/${encodeURIComponent(graphId)}/attachments?$select=id,name,contentType,size,isInline`,
+      { headers: { Prefer: 'IdType="ImmutableId"' } },
+    );
+    if (!res.ok) throw new MailError(`Graph attachment list failed: ${res.status} ${await safeText(res)}`, "run");
+    const json = (await res.json()) as {
+      value: {
+        id: string;
+        name?: string;
+        contentType?: string;
+        size?: number;
+        isInline?: boolean;
+        "@odata.type"?: string;
+      }[];
+    };
+    return json.value.map((a) => ({
+      id: a.id,
+      name: a.name ?? "unnamed",
+      contentType: a.contentType ?? null,
+      size: a.size ?? 0,
+      isInline: !!a.isInline,
+      kind:
+        a["@odata.type"] === "#microsoft.graph.fileAttachment"
+          ? "file"
+          : a["@odata.type"] === "#microsoft.graph.referenceAttachment"
+            ? "reference"
+            : "item",
+    }));
+  }
+
+  /** The raw bytes of one file attachment. The caller has already decided it is small enough. */
+  async downloadAttachment(graphId: string, attachmentId: string): Promise<Buffer> {
+    const res = await this.api(
+      `/messages/${encodeURIComponent(graphId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
+      { headers: { Prefer: 'IdType="ImmutableId"' } },
+    );
+    if (!res.ok) throw new MailError(`Graph attachment download failed: ${res.status} ${await safeText(res)}`, "run");
+    return Buffer.from(await res.arrayBuffer());
   }
 }

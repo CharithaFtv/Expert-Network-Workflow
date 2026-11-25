@@ -1,6 +1,7 @@
 import { db } from "../db.ts";
 import { CursorExpiredError, type InboundMessage, type InboxReader } from "./inbox.ts";
 import { matchPending, type MatchCounts } from "./match.ts";
+import { fetchAttachments, type AttachmentCounts, type AttachmentSource } from "./attachments.ts";
 
 export const DEFAULT_LOOKBACK_DAYS = 14;
 
@@ -13,6 +14,8 @@ export type PollResult = {
   cursorReset?: boolean;
   /** What matching did with the messages waiting after this poll (not in a dry run). */
   matching?: MatchCounts;
+  /** Attachment handling for verified mail (only for a reader that can list attachments). */
+  attachments?: AttachmentCounts;
 };
 
 /** Postgres text and JSONB cannot hold a NUL character; email can, so remove it before inserting. */
@@ -149,6 +152,8 @@ export async function pollInbox(
     // After the cursor is safe: match everything still waiting. If this fails, the messages stay in
     // `Received` and the next poll (or `npm run match-inbox`) matches them.
     result.matching = await matchPending();
+    // Attachments of verified mail only. A failure here leaves those messages for the next poll.
+    if ("listAttachments" in reader) result.attachments = await fetchAttachments(reader as unknown as AttachmentSource);
   }
   return result;
 }
