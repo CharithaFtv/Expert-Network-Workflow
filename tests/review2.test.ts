@@ -59,13 +59,26 @@ describe("dueForPurge (the dry run)", () => {
     await inbound(closed);
     await inbound(closed);
     await changeProjectStatus(closed, as(ALICE), "Closed", {});
-    expect(await dueForPurge(new Date(), {})).toEqual([]); // no period: nothing is due
-    const due = await dueForPurge(new Date(Date.now() + 1000), { RETENTION_DAYS_AFTER_CLOSE: "0" });
+    expect(await dueForPurge(new Date(), {}, true)).toEqual([]); // no period: nothing is due
+    const later = new Date(Date.now() + 1000);
+    // Undated mail on an already-closed project is NOT counted by default: it is only touched on request.
+    expect(await dueForPurge(later, { RETENTION_DAYS_AFTER_CLOSE: "0" })).toEqual([]);
+    const due = await dueForPurge(later, { RETENTION_DAYS_AFTER_CLOSE: "0" }, true);
     expect(due).toHaveLength(1);
     expect(due[0]).toMatchObject({ messages: 2, attachments: 0 });
-    const notYet = await dueForPurge(new Date(), { RETENTION_DAYS_AFTER_CLOSE: "30" });
+    const notYet = await dueForPurge(new Date(), { RETENTION_DAYS_AFTER_CLOSE: "30" }, true);
     expect(notYet).toEqual([]); // closed, but 30 days have not passed
     expect((await db.query("SELECT 1 FROM inbound_messages WHERE retain_until IS NOT NULL")).length).toBe(0);
+  });
+
+  it("counts mail that already has a retention date, without needing the closed-project option", async () => {
+    const closed = await project();
+    const m = await inbound(closed);
+    await changeProjectStatus(closed, as(ALICE), "Closed", { RETENTION_DAYS_AFTER_CLOSE: "0" }); // dated at close
+    expect(await retain(m)).not.toBeNull();
+    const due = await dueForPurge(new Date(Date.now() + 1000), {});
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({ messages: 1 });
   });
 });
 

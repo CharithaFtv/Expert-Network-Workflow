@@ -152,10 +152,14 @@ async function checkSender(
       note: free ? "personal-mail address that is not a vendor's own address" : "sender domain is not on the vendor list",
     };
   }
+  // Exact address first, against every known vendor: if the sender is another vendor's own address, that
+  // is who it is, and it is named only when that vendor is on the project (never swapped for a project
+  // vendor that merely shares the domain). Without an exact address, only a single project vendor on the
+  // domain is certain.
+  const exact = known.filter((v) => v.intake_email?.toLowerCase() === address!.toLowerCase());
   const onProject = known.filter((v) => v.on_project);
-  const exact = onProject.filter((v) => v.intake_email?.toLowerCase() === address!.toLowerCase());
-  // Exact address first; otherwise only a single project vendor on that domain is certain.
-  const vendorId = exact.length === 1 ? exact[0].id : onProject.length === 1 ? onProject[0].id : null;
+  const vendorId =
+    exact.length === 1 ? (exact[0].on_project ? exact[0].id : null) : onProject.length === 1 ? onProject[0].id : null;
   if (!senderAuthenticated(headers, env)) {
     return { verified: false, vendorId, note: "sender not authenticated (SPF, DKIM or DMARC)" };
   }

@@ -136,6 +136,18 @@ describe("sender check", () => {
     expect(await outcome(id)).toMatchObject({ status: "Matched", vendor_id: null, sender_verified: true });
   });
 
+  it("does not give a project vendor's ID to a reply from another vendor's own address on the same domain", async () => {
+    // Vendors 1 and 2 both use vendor.test; only vendor 1 is on the project.
+    const p = await project([1]);
+    const other = await inbound({ subject: `[${p.code}] x`, from: "intake2@vendor.test" }); // vendor 2's own address
+    const mine = await inbound({ subject: `[${p.code}] x`, from: "intake1@vendor.test" }); // vendor 1's own address
+    const anyone = await inbound({ subject: `[${p.code}] x`, from: "analyst@vendor.test" }); // nobody's own address
+    await matchPending();
+    expect(await outcome(other)).toMatchObject({ status: "Matched", vendor_id: null, sender_verified: true });
+    expect(await outcome(mine)).toMatchObject({ status: "Matched", vendor_id: 1 });
+    expect(await outcome(anyone)).toMatchObject({ status: "Matched", vendor_id: 1 }); // the only project vendor on that domain
+  });
+
   it("does not accept the domain of an inactive vendor", async () => {
     await db.query("UPDATE vendors SET intake_email = 'intake2@other2.test', active = 0 WHERE id = 2");
     const p = await project([1]);

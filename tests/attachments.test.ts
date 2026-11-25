@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import {
+  AttachmentTooLargeError,
   fetchAttachments,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_TRIES,
@@ -58,6 +59,11 @@ describe("skipReason", () => {
   it("skips programs, scripts and macro-enabled Office files", () => {
     for (const name of ["a.exe", "a.js", "A.DOCM", "b.xlsm", "c.ps1", "d.lnk"]) {
       expect(skipReason(info({ name }), 0)).toBe("blocked file type");
+    }
+  });
+  it("blocks every macro-enabled Office format, including PowerPoint templates and slideshows", () => {
+    for (const ext of ["docm", "dotm", "xlsm", "xltm", "xlam", "pptm", "potm", "ppsm", "ppam", "sldm"]) {
+      expect(skipReason(info({ name: `file.${ext}` }), 0), ext).toBe("blocked file type");
     }
   });
   it("sees through trailing dots and spaces, hidden characters and upper case", () => {
@@ -171,6 +177,23 @@ describe("fetchAttachments", () => {
     expect(rows.every((r) => r.attachments_attempts === MAX_ATTACHMENT_TRIES)).toBe(true);
     expect(rows[0].attachments_error).toContain("not found");
     expect(last).toMatchObject({ messages: 0, failed: 0, abandoned: 3 }); // given up on, and reported
+  });
+
+  it("records a file that is larger than the limit as Skipped, not as a failed download", async () => {
+    const m = await message();
+    const src = source({ [m.graphId]: [{ info: info({ id: "big", size: 10 }), bytes: Buffer.from("x") }] });
+    const seenLimits: (number | undefined)[] = [];
+    src.downloadAttachment = async (_g, _id, maxBytes) => {
+      seenLimits.push(maxBytes);
+      throw new AttachmentTooLargeError("too big");
+    };
+    const counts = await fetchAttachments(src);
+    expect(counts).toMatchObject({ messages: 1, stored: 0, skipped: 1, failed: 0 });
+    expect(seenLimits).toEqual([MAX_ATTACHMENT_BYTES]); // the limit is passed down to the download
+    const [r] = await db.query<{ status: string; skip_reason: string }>("SELECT status, skip_reason FROM inbound_attachments");
+    expect(r).toEqual({ status: "Skipped", skip_reason: "over the size limit" });
+    const [m2] = await db.query<{ attachments_attempts: number }>("SELECT attachments_attempts FROM inbound_messages WHERE id = $1", [m.id]);
+    expect(m2.attachments_attempts).toBe(0); // not counted as a failure to retry
   });
 
   it("trusts the bytes it received over the size Graph listed", async () => {
@@ -298,6 +321,57 @@ describe("GraphInbox attachments", () => {
   });
 
   const att = (id: string) => ({ id, name: `${id}.pdf`, size: 1, "@odata.type": "#microsoft.graph.fileAttachment" });
+
+  it("stops reading a download as soon as it exceeds the limit", async () => {
+    let pulled = 0;
+    const total = 50;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= total) return controller.close();
+        pulled++;
+        controller.enqueue(new Uint8Array(1024 * 1024)); // 1 MiB per chunk, 50 MiB in all
+      },
+    });
+    const fetchFn = (async (url: string) => {
+      if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
+      return new Response(body, { status: 200 }); // no Content-Length: only the stream can tell
+    }) as unknown as typeof fetch;
+    const limit = 10 * 1024 * 1024;
+    await expect(new GraphInbox(cfg, fetchFn).downloadAttachment("m", "a", limit)).rejects.toBeInstanceOf(
+      AttachmentTooLargeError,
+    );
+    expect(pulled).toBeLessThan(20); // nowhere near the whole 50 MiB was read
+  });
+
+  it("refuses a download whose declared length is already over the limit, without reading it", async () => {
+    let read = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          read = true;
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 }, // pull only when a reader asks, so `read` shows whether anyone read
+    );
+    const fetchFn = (async (url: string) => {
+      if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
+      return new Response(body, { status: 200, headers: { "Content-Length": String(11 * 1024 * 1024) } });
+    }) as unknown as typeof fetch;
+    await expect(new GraphInbox(cfg, fetchFn).downloadAttachment("m", "a", 10 * 1024 * 1024)).rejects.toBeInstanceOf(
+      AttachmentTooLargeError,
+    );
+    expect(read).toBe(false);
+  });
+
+  it("returns a file that is within the limit in full", async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes("login.microsoftonline.com")) return json({ access_token: "tok", expires_in: 3600 });
+      return new Response(Buffer.from("hello world"), { status: 200 });
+    }) as unknown as typeof fetch;
+    const bytes = await new GraphInbox(cfg, fetchFn).downloadAttachment("m", "a", 1024);
+    expect(bytes.toString()).toBe("hello world");
+  });
 
   it("follows the paging links so no attachment is missed", async () => {
     const calls: { url: string; prefer: string | null }[] = [];

@@ -6,7 +6,9 @@ type Env = Record<string, string | undefined>;
 /**
  * Gives mail on already-closed projects a retention date once a retention period is set. A project that
  * was closed while no period was set left its mail with no date; this applies the period from the day each
- * project closed. Does nothing while the period is unset. Run by `npm run purge-inbox -- --apply`.
+ * project closed, so mail on long-closed projects can become due at once. Does nothing while the period is
+ * unset. It is retroactive and destructive in effect, so it only runs when asked for explicitly:
+ * `npm run purge-inbox -- --apply --include-closed`.
  */
 export async function backfillRetention(env: Env = process.env): Promise<number> {
   const days = retentionDaysAfterClose(env);
@@ -32,10 +34,14 @@ export type DueRow = { project: string; messages: number; attachments: number };
 
 /**
  * What a purge would remove right now, per project, without changing anything. Counts messages that are
- * already dated and past it, and messages on closed projects that the backfill would date and that are
- * then past it.
+ * already dated and past it. With `includeClosed` it also counts mail on already-closed projects that has
+ * no date yet and that the backfill would date and then find past it.
  */
-export async function dueForPurge(now = new Date(), env: Env = process.env): Promise<DueRow[]> {
+export async function dueForPurge(
+  now = new Date(),
+  env: Env = process.env,
+  includeClosed = false,
+): Promise<DueRow[]> {
   const days = retentionDaysAfterClose(env);
   const stamp = now.toISOString();
   const rows = await db.query<{ code: string; retain_until: string | null; closed_at: string | null; attachments: number }>(
@@ -48,7 +54,7 @@ export async function dueForPurge(now = new Date(), env: Env = process.env): Pro
   for (const r of rows) {
     const due = r.retain_until
       ? r.retain_until <= stamp
-      : days !== null && r.closed_at !== null && retainUntilAfterClose(r.closed_at, days) <= stamp;
+      : includeClosed && days !== null && r.closed_at !== null && retainUntilAfterClose(r.closed_at, days) <= stamp;
     if (!due) continue;
     const row = byProject.get(r.code) ?? { project: r.code, messages: 0, attachments: 0 };
     row.messages++;

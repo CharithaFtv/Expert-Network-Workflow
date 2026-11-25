@@ -31,8 +31,13 @@ try {
     console.error(`messages were stored, but a follow-up step failed (${err}). The next poll retries it.`);
     exitCode = 1;
   }
+  if (result.attachments?.failed) {
+    console.error(`attachments could not be fetched for ${result.attachments.failed} message(s); the next poll retries them: ${result.attachments.errors.join("; ")}`);
+    exitCode = 1;
+  }
   if (result.attachments?.abandoned) {
     console.error(`${result.attachments.abandoned} message(s) had attachments that kept failing and were given up on; they need a person.`);
+    exitCode = 1;
   }
 } catch (e) {
   console.error(`poll-inbox: ${(e as Error).message}`);

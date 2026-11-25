@@ -1,6 +1,6 @@
 import { GraphClient, safeText } from "./graph.ts";
 import { MailError } from "./transport.ts";
-import type { AttachmentInfo, AttachmentSource } from "./attachments.ts";
+import { AttachmentTooLargeError, type AttachmentInfo, type AttachmentSource } from "./attachments.ts";
 
 /** One received email, as Graph describes it. */
 export type InboundMessage = {
@@ -181,12 +181,41 @@ export class GraphInbox extends GraphClient implements InboxReader, AttachmentSo
   }
 
   /** The raw bytes of one file attachment. The caller has already decided it is small enough. */
-  async downloadAttachment(graphId: string, attachmentId: string): Promise<Buffer> {
+  async downloadAttachment(
+    graphId: string,
+    attachmentId: string,
+    maxBytes = Number.POSITIVE_INFINITY,
+  ): Promise<Buffer> {
     const res = await this.api(
       `/messages/${encodeURIComponent(graphId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
       { headers: { Prefer: 'IdType="ImmutableId"' } },
     );
     if (!res.ok) throw new MailError(`Graph attachment download failed: ${res.status} ${await safeText(res)}`, "run");
-    return Buffer.from(await res.arrayBuffer());
+    // The size Graph listed can understate the file, so the limit is enforced on the stream itself: stop
+    // reading and drop the connection the moment it is exceeded, instead of buffering the whole body.
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await res.body?.cancel().catch(() => {});
+      throw new AttachmentTooLargeError(`attachment is larger than ${maxBytes} bytes`);
+    }
+    if (!res.body) {
+      const all = Buffer.from(await res.arrayBuffer());
+      if (all.length > maxBytes) throw new AttachmentTooLargeError(`attachment is larger than ${maxBytes} bytes`);
+      return all;
+    }
+    const reader = res.body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new AttachmentTooLargeError(`attachment is larger than ${maxBytes} bytes`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
   }
 }

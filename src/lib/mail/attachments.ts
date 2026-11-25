@@ -20,8 +20,12 @@ export type AttachmentInfo = {
 /** Where attachments come from. Graph in production, a fake in tests. */
 export interface AttachmentSource {
   listAttachments(graphId: string): Promise<AttachmentInfo[]>;
-  downloadAttachment(graphId: string, attachmentId: string): Promise<Buffer>;
+  /** Reads at most `maxBytes`; throws AttachmentTooLargeError (and stops reading) if the file is larger. */
+  downloadAttachment(graphId: string, attachmentId: string, maxBytes?: number): Promise<Buffer>;
 }
+
+/** The file turned out larger than the limit. Not a failure: the attachment is recorded as Skipped. */
+export class AttachmentTooLargeError extends Error {}
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
@@ -32,7 +36,7 @@ const BLOCKED = new Set([
   "jse", "wsf", "ws", "wsh", "wsc", "jar", "jnlp", "lnk", "hta", "cpl", "scf", "inf", "reg", "pif", "chm", "msc",
   "sys", "ocx", "drv", "gadget", "application", "appx", "msix", "appxbundle", "msixbundle", "sh", "bash", "zsh",
   "csh", "py", "pl", "rb", "app", "pkg", "deb", "rpm", "bin", "ipa", "apk", "iso", "dmg", "docm", "xlsm", "pptm",
-  "dotm", "xltm", "xlam", "ppam", "sldm", "xla", "iqy", "slk",
+  "dotm", "xltm", "xlam", "ppam", "ppsm", "potm", "sldm", "xla", "iqy", "slk",
 ]);
 
 /** Control and bidirectional-override characters can hide a real extension; trailing dots and spaces are ignored by Windows. */
@@ -94,7 +98,16 @@ export async function fetchAttachments(source: AttachmentSource, limit = 50): Pr
         let reason = skipReason(info, storedBytes);
         let bytes: Buffer | null = null;
         if (!reason) {
-          bytes = await source.downloadAttachment(m.graph_id, info.id);
+          try {
+            // The source stops reading at the limit, so a file larger than Graph listed is never held whole.
+            bytes = await source.downloadAttachment(m.graph_id, info.id, MAX_ATTACHMENT_BYTES);
+          } catch (e) {
+            if (!(e instanceof AttachmentTooLargeError)) throw e;
+            bytes = null;
+            reason = "over the size limit"; // a finding about the file, not a failed download
+          }
+        }
+        if (!reason && bytes) {
           // The size Graph listed can be wrong; the bytes we got are what counts.
           if (bytes.length > MAX_ATTACHMENT_BYTES) {
             reason = "over the size limit";
