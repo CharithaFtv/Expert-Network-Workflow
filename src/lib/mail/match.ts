@@ -1,4 +1,5 @@
 import { db } from "../db.ts";
+import { retainUntilForProject } from "../projectStatus.ts";
 
 /**
  * Step 3b: decide which project a received message belongs to, and whether the sender is a vendor on it.
@@ -125,6 +126,11 @@ async function save(id: number, r: MatchResult) {
      WHERE id = $1`,
     [id, r.status, r.projectId, r.vendorId, r.method, r.senderVerified, new Date().toISOString()],
   );
+  // Mail for a project that is already closed expires on the same terms as the rest of its mail.
+  if (r.projectId) {
+    const until = await retainUntilForProject(r.projectId);
+    if (until) await db.query("UPDATE inbound_messages SET retain_until = $2 WHERE id = $1", [id, until]);
+  }
 }
 
 export type MatchCounts = { matched: number; unverified: number; unmatched: number };

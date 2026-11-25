@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getUser } from "@/lib/dealcloud";
 import { buildNetworkBrief, getProjectFor } from "@/lib/projects";
+import { ProjectStatusControl } from "@/components/ProjectStatusControl";
+import { nextStatuses } from "@/lib/projectStatus";
 import { requireUser } from "@/lib/session";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
@@ -116,6 +118,22 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
               <dd>{project.sector || "Not set"}</dd>
             </dl>
             <p className="hint">Status as recorded when the request was submitted.</p>
+          </section>
+
+          <section className="card stack">
+            <h2>Project status</h2>
+            <div className="deal">
+              <strong>{project.status}</strong>
+              <span className="tag blue">{project.status}</span>
+            </div>
+            <ProjectStatusControl
+              projectId={project.id}
+              options={[...nextStatuses(project.status)]}
+              canClose={project.requester_id === user.id}
+            />
+            <p className="hint">
+              Closing starts the retention clock for the emails and attachments received on this project.
+            </p>
           </section>
 
           <section className="card stack">
