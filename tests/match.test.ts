@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { pollInbox } from "@/lib/mail/inbound";
 import type { InboundMessage, InboxReader } from "@/lib/mail/inbox";
-import { assignToProject, domainOf, matchPending, referencedIds, senderAuthenticated } from "@/lib/mail/match";
+import { assignToProject, authResults, domainOf, matchPending, referencedIds, senderAuthenticated } from "@/lib/mail/match";
 import { createProject } from "@/lib/projects";
 import { changeProjectStatus } from "@/lib/projectStatus";
 import { ALICE, person, resetDb, validBrief } from "./helpers";
@@ -349,6 +349,40 @@ describe("sender authentication", () => {
       ),
     ];
     expect(senderAuthenticated(spoof, {})).toBe(false);
+  });
+
+  it("reads the result as a field, so text the sender controls cannot plant a pass", () => {
+    const ar = (value: string) => senderAuthenticated([hdr("Authentication-Results", value)], {});
+    // In a comment, in a quoted reason, and inside property values (header.d, smtp.mailfrom, header.from).
+    expect(ar("mx.microsoft.com 1; dmarc=fail (dmarc=pass) header.from=vendor.test")).toBe(false);
+    expect(ar('mx.microsoft.com 1; dkim=fail reason="x; dmarc=pass" header.d=evil.test; dmarc=fail')).toBe(false);
+    expect(ar("mx.microsoft.com 1; dkim=none header.d=dmarc=pass.evil.test; dmarc=fail action=none")).toBe(false);
+    expect(ar("mx.microsoft.com 1; spf=pass smtp.mailfrom=a@dmarc=pass.evil.test; dmarc=none")).toBe(false);
+    expect(ar("mx.microsoft.com 1; dmarc=fail (comment (nested; dmarc=pass))")).toBe(false);
+    // A header with no server name first does not get its first result skipped into a pass.
+    expect(ar("dmarc=pass")).toBe(false);
+    // A failing result next to a passing one is not ignored.
+    expect(ar("mx.microsoft.com 1; dmarc=pass; dmarc=fail")).toBe(false);
+    // The real shapes still pass or fail as they should.
+    expect(ar("mx.microsoft.com 1; dkim=pass header.d=vendor.test; dmarc=pass action=none header.from=vendor.test")).toBe(true);
+    expect(ar("mx.microsoft.com 1; DMARC = PASS (p=reject) header.from=vendor.test")).toBe(true);
+    expect(ar("mx.microsoft.com 1; dkim=none (message not signed) header.d=none;dmarc=none action=none header.from=ftvcapital.com;")).toBe(false);
+  });
+
+  it("reads the topmost AuthAs header only, so a forged lower one cannot claim to be internal", () => {
+    const anonymous = hdr("X-MS-Exchange-Organization-AuthAs", "Anonymous");
+    const internal = hdr("X-MS-Exchange-Organization-AuthAs", "Internal");
+    expect(senderAuthenticated([anonymous, internal], {})).toBe(false);
+    expect(senderAuthenticated([internal, anonymous], {})).toBe(true);
+  });
+
+  it("parses the method results of an Authentication-Results header", () => {
+    expect(authResults("mx 1; spf=pass smtp.mailfrom=a@b.test; dkim=fail (bad); dmarc=none action=none")).toEqual([
+      { method: "spf", result: "pass" },
+      { method: "dkim", result: "fail" },
+      { method: "dmarc", result: "none" },
+    ]);
+    expect(authResults("")).toEqual([]);
   });
 
   it("reads only the topmost Authentication-Results header, so one the sender included cannot vouch for itself", () => {

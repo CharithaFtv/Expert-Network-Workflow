@@ -103,8 +103,10 @@ export const FREE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
  *   - otherwise DMARC must have passed. SPF or DKIM passing alone is not enough: they can pass for a
  *     domain that is not the one shown in From, and only DMARC checks that the two line up
  *   - anything else (fail, none, no header) does not
- * Only the topmost Authentication-Results header is read: the receiving server adds its own on top, while
- * a header the sender included sits below it and could claim anything.
+ * Only the topmost copy of each header is read: the receiving server adds its own on top, while a header
+ * the sender included sits below it and could claim anything. The result is read as a structured field,
+ * not searched as text: the text contains values the sender controls (the From and envelope domains,
+ * comments, quoted reasons), and a search for "dmarc=pass" would find a match planted in any of them.
  * SENDER_AUTH=off skips the check (local development without real vendor mail). Default: on.
  */
 export function senderAuthenticated(
@@ -112,11 +114,30 @@ export function senderAuthenticated(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   if ((env.SENDER_AUTH ?? "").trim().toLowerCase() === "off") return true;
-  const values = (name: string) =>
-    (headers ?? []).filter((h) => h.name.toLowerCase() === name).map((h) => h.value.toLowerCase());
-  if (values("x-ms-exchange-organization-authas").some((v) => v.trim() === "internal")) return true;
-  const results = values("authentication-results")[0] ?? "";
-  return /\bdmarc=pass\b/.test(results);
+  const top = (name: string) => (headers ?? []).find((h) => h.name.toLowerCase() === name)?.value;
+  if (top("x-ms-exchange-organization-authas")?.trim().toLowerCase() === "internal") return true;
+  const dmarc = authResults(top("authentication-results") ?? "").filter((r) => r.method === "dmarc");
+  // Every DMARC result must be a pass (a second, failing one is not ignored), and there must be one.
+  return dmarc.length > 0 && dmarc.every((r) => r.result === "pass");
+}
+
+/**
+ * The method results in an Authentication-Results header ("dmarc=pass", "spf=fail", ...), read the way
+ * the format defines them: after the server name, each result starts a segment separated by `;`.
+ * Comments in parentheses and quoted strings are removed first, since they can carry text the sender
+ * influences, and a result is only taken from the start of a segment, never from inside a property value.
+ */
+export function authResults(value: string): { method: string; result: string }[] {
+  let s = value.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  for (let i = 0; i < 20 && /\([^()]*\)/.test(s); i++) s = s.replace(/\([^()]*\)/g, " "); // nested comments too
+  const segments = s.split(";").map((p) => p.trim()).filter(Boolean);
+  const out: { method: string; result: string }[] = [];
+  for (const seg of segments.slice(1)) {
+    // slice(1): the first segment is the server name (and version), not a result
+    const m = seg.match(/^([a-z][a-z0-9-]*)\s*=\s*([a-z][a-z0-9-]*)/i);
+    if (m) out.push({ method: m[1].toLowerCase(), result: m[2].toLowerCase() });
+  }
+  return out;
 }
 
 type SenderCheck = { verified: boolean; vendorId: number | null; note: string | null };
